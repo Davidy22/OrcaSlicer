@@ -3054,6 +3054,8 @@ void TabPrint::build()
         optgroup = page->new_optgroup(L("Flush options"), L"param_flush");
         optgroup->append_single_option_line("flush_into_infill", "multimaterial_settings_flush_options#flush-into-objects-infill");
         optgroup->append_single_option_line("flush_into_objects", "multimaterial_settings_flush_options");
+        optgroup->append_single_option_line("flush_into_inner_walls", "multimaterial_settings_flush_options");
+        optgroup->append_single_option_line("flush_inner_walls_max_extra_loops", "multimaterial_settings_flush_options");
         optgroup->append_single_option_line("flush_into_support", "multimaterial_settings_flush_options#flush-into-objects-support");
         optgroup = page->new_optgroup(L("Advanced"), L"advanced");
         optgroup->append_single_option_line("interlocking_beam", "multimaterial_settings_advanced#interlocking-beam");

@@ -1329,6 +1329,18 @@ static bool is_unsupported_loop(const ExtrusionEntity *entity)
                                          [](const ExtrusionPath &path) { return path.role() == erOverhangPerimeter; });
 }
 
+// Tag only newly generated closed inner loops. An island collection still
+// contains normal/external walls and must never be marked purgeable as a whole.
+static void tag_purge_inner_walls(ExtrusionEntityCollection &entities, int first_purge_inset)
+{
+    for (ExtrusionEntity *entity : entities.entities) {
+        if (auto *collection = dynamic_cast<ExtrusionEntityCollection *>(entity))
+            tag_purge_inner_walls(*collection, first_purge_inset);
+        else if (entity->is_loop() && entity->inset_idx >= first_purge_inset && entity->inset_idx > 0)
+            static_cast<ExtrusionLoop *>(entity)->generated_for_purge = true;
+    }
+}
+
 // ORCA: A wall loop with nothing under it has nothing to lean on, so whatever the configured wall
 // sequence it is extruded after the loops that anchor it, innermost first. A loop that runs alongside
 // an anchored one belongs to the same wall stack and keeps its place ahead of the infill, which needs
@@ -1472,10 +1484,13 @@ void PerimeterGenerator::process_classic()
     for (size_t order_idx = 0; order_idx < surface_order.size(); order_idx++) {
         const Surface &surface = all_surfaces[surface_order[order_idx]];
         // detect how many perimeters must be generated for this island
-        int loop_number = this->config->wall_loops + surface.extra_perimeters - 1;  // 0-indexed loops
+        int normal_wall_loops = this->config->wall_loops + surface.extra_perimeters;
         int sparse_infill_density = this->config->sparse_infill_density.value;
-        if (this->config->alternate_extra_wall && this->layer_id % 2 == 1 && !m_spiral_vase && sparse_infill_density > 0) // add alternating extra wall
-            loop_number++;
+        if (this->config->alternate_extra_wall && this->layer_id % 2 == 1 && !m_spiral_vase && sparse_infill_density > 0)
+            ++normal_wall_loops;
+        const int purge_wall_loops = !m_spiral_vase && normal_wall_loops > 0 ? std::max(0, extra_purge_wall_loops) : 0;
+        first_purge_inset = purge_wall_loops > 0 ? normal_wall_loops : -1;
+        int loop_number = normal_wall_loops + purge_wall_loops - 1; // 0-indexed loops
         if (this->layer_id == object_config->raft_layers && only_one_wall_first_layer)
             loop_number = 0;
         // Set the topmost layer to be one wall
@@ -1872,6 +1887,8 @@ void PerimeterGenerator::process_classic()
                 }
             }
             
+            if (purge_wall_loops > 0)
+                tag_purge_inner_walls(entities, normal_wall_loops);
             defer_unsupported_loops(*this, entities);
 
             // append perimeters for this slice as a collection
@@ -2459,10 +2476,13 @@ void PerimeterGenerator::process_arachne()
     for (const Surface& surface : all_surfaces) {
         coord_t bead_width_0 = ext_perimeter_spacing;
         // detect how many perimeters must be generated for this island
-        int loop_number = this->config->wall_loops + surface.extra_perimeters - 1; // 0-indexed loops
+        int normal_wall_loops = this->config->wall_loops + surface.extra_perimeters;
         int sparse_infill_density = this->config->sparse_infill_density.value;
-        if (this->config->alternate_extra_wall && this->layer_id % 2 == 1 && !m_spiral_vase && sparse_infill_density > 0) // add alternating extra wall
-            loop_number++;
+        if (this->config->alternate_extra_wall && this->layer_id % 2 == 1 && !m_spiral_vase && sparse_infill_density > 0)
+            ++normal_wall_loops;
+        const int purge_wall_loops = !m_spiral_vase && normal_wall_loops > 0 ? std::max(0, extra_purge_wall_loops) : 0;
+        first_purge_inset = purge_wall_loops > 0 ? normal_wall_loops : -1;
+        int loop_number = normal_wall_loops + purge_wall_loops - 1; // 0-indexed loops
 
         // Set the bottommost layer to be one wall
         const bool is_bottom_layer = (this->layer_id == object_config->raft_layers) ? true : false;
@@ -2812,6 +2832,8 @@ void PerimeterGenerator::process_arachne()
                 reorient_perimeters(extrusion_coll, steep_overhang_contour, steep_overhang_hole,
                                     this->config->overhang_reverse_internal_only);
             }
+            if (purge_wall_loops > 0)
+                tag_purge_inner_walls(extrusion_coll, normal_wall_loops);
             defer_unsupported_loops(*this, extrusion_coll);
             this->loops->append(extrusion_coll);
         }

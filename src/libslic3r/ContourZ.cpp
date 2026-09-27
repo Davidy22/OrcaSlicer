@@ -168,6 +168,9 @@ static void contour_extrusion_multipath(LayerRegion *region, const sla::IndexedM
 
 static void contour_extrusion_loop(LayerRegion *region, const sla::IndexedMesh &mesh, ExtrusionLoop &loop) 
 {
+    // Added purge walls and their selected inner foundations were verified at
+    // this Z. Surface contouring remains enabled on all unrelated geometry.
+    if (loop.generated_for_purge || loop.purge_support) return;
 	for (ExtrusionPath &path : loop.paths) {
 		contour_extrusion_path(region, mesh, path);
 	}

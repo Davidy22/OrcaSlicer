@@ -333,6 +333,8 @@ public:
     };
 
 private:
+    bool m_inner_wall_toolchange = false;
+    std::optional<unsigned int> m_inner_wall_initial_filament;
     class GCodeOutputStream {
     public:
         GCodeOutputStream(FILE *f, GCodeProcessor &processor) : f(f), m_processor(processor) {}
@@ -504,7 +506,7 @@ private:
             std::vector<Region> by_region;                                    // all extrusions for this island, grouped by regions
 
             // Fills in by_region_per_copy_cache and returns its reference.
-            const std::vector<Region>& by_region_per_copy(std::vector<Region> &by_region_per_copy_cache, unsigned int copy, unsigned int extruder, bool wiping_entities = false) const;
+            const std::vector<Region>& by_region_per_copy(std::vector<Region> &by_region_per_copy_cache, unsigned int copy, unsigned int extruder, int wiping_pass = 0) const;
         };
         std::vector<Island>         islands;
     };

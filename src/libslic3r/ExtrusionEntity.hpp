@@ -459,6 +459,15 @@ public:
     // infill is down. See defer_unsupported_loops() in PerimeterGenerator.cpp.
     bool print_after_infill = false;
 
+    // Provenance only: not permission to override the material. Purge allocation
+    // must additionally verify hidden geometry, support and filament compatibility.
+    bool generated_for_purge = false;
+    // Set only after hidden-surface and actual lower-extrusion coverage checks.
+    bool purge_safe = false;
+    // An ordinary inner loop used as a measured foundation for an added wall.
+    // Preserve its geometry, but do NOT make it eligible for a material override.
+    bool purge_support = false;
+
     ExtrusionLoop(ExtrusionLoopRole role = elrDefault) : m_loop_role(role) {}
     ExtrusionLoop(const ExtrusionPaths &paths, ExtrusionLoopRole role = elrDefault) : paths(paths), m_loop_role(role) {}
     ExtrusionLoop(ExtrusionPaths &&paths, ExtrusionLoopRole role = elrDefault) : paths(std::move(paths)), m_loop_role(role) {}

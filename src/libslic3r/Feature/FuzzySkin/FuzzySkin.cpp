@@ -562,6 +562,7 @@ static std::vector<MergedFuzzyRegion> collect_merged_fuzzy_regions(const std::ve
 
 Polygon apply_fuzzy_skin(const Polygon& polygon, const PerimeterGenerator& perimeter_generator, const size_t loop_idx, const bool is_contour)
 {
+    if (perimeter_generator.is_purge_inset(loop_idx)) return polygon;
     Polygon fuzzified;
 
     const auto  slice_z = perimeter_generator.slice_z;
@@ -686,6 +687,7 @@ Polygon apply_fuzzy_skin(const Polygon& polygon, const PerimeterGenerator& perim
 
 void apply_fuzzy_skin(Arachne::ExtrusionLine* extrusion, const PerimeterGenerator& perimeter_generator, const bool is_contour, const bool closed)
 {
+    if (perimeter_generator.is_purge_inset(extrusion->inset_idx)) return;
     const auto  slice_z = perimeter_generator.slice_z;
     const auto  layer_height = perimeter_generator.layer_height;
     const auto& regions = perimeter_generator.regions_by_fuzzify;

@@ -217,6 +217,11 @@ void Layer::make_perimeters()
 	            if (! (*it)->slices.empty()) {
 		            LayerRegion* other_layerm = *it;
 		            const PrintRegion &other_region = other_layerm->region();
+                    // A purge plan was measured against this region's geometry.
+                    // Even equal counts are not permission to merge different
+                    // regions: doing so can change loop capacity and support.
+                    if ((*layerm)->purge_inner_wall_plan.extra_loops > 0 || other_layerm->purge_inner_wall_plan.extra_loops > 0)
+                        continue;
                     // Per-part gradient tags a region with its owning ModelVolume; merging two
                     // differently-tagged regions would collapse volumes that need independent
                     // gradient runs. Both tags are invalid unless per-part gradient is on, so

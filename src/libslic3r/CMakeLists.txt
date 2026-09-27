@@ -354,6 +354,8 @@ set(lisbslic3r_sources
     pchheader.hpp
     PerimeterGenerator.cpp
     PerimeterGenerator.hpp
+    PurgeInnerWallPlan.hpp
+    PurgeInnerWalls.cpp
     PlaceholderParser.cpp
     PlaceholderParser.hpp
     Platform.cpp

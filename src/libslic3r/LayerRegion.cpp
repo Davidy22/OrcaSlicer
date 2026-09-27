@@ -130,6 +130,7 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     if (this->layer()->upper_layer != NULL)
         g.upper_slices_same_region = &this->layer()->upper_layer->get_region(region_id)->slices;
 
+    g.extra_purge_wall_loops = this->purge_inner_wall_plan.extra_loops;
     g.layer_id              = (int)this->layer()->id();
     g.ext_perimeter_flow    = this->flow(frExternalPerimeter);
     g.overhang_flow         = this->bridging_flow(frPerimeter, object_config.thick_bridges);
@@ -1054,6 +1055,7 @@ void LayerRegion::export_region_fill_surfaces_to_svg_debug(const char *name) con
 
 void LayerRegion::simplify_entity_collection(ExtrusionEntityCollection* entity_collection)
 {
+    if (entity_collection->purge_geometry_locked) return;
     for (size_t i = 0; i < entity_collection->entities.size(); i++) {
         if (ExtrusionEntityCollection* collection = dynamic_cast<ExtrusionEntityCollection*>(entity_collection->entities[i]))
             this->simplify_entity_collection(collection);
@@ -1108,6 +1110,10 @@ void LayerRegion::simplify_multi_path(ExtrusionMultiPath* multipath)
 
 void LayerRegion::simplify_loop(ExtrusionLoop* loop)
 {
+    // These loops have already been measured and geometrically verified.
+    // Arc fitting / simplification afterwards could shorten purge volume or
+    // move a lower support footprint out from under its upper purge loop.
+    if (loop->generated_for_purge || loop->purge_support) return;
     const auto print_config = this->layer()->object()->print()->config();
     const bool spiral_mode = print_config.spiral_mode;
     const bool enable_arc_fitting = print_config.enable_arc_fitting;

@@ -62,7 +62,8 @@ public:
         SlicingReplaceInitEmptyLayers,
         SlicingNeedSupportOn,
         SlicingEmptyGcodeLayers,
-        SlicingGcodeOverlap
+        SlicingGcodeOverlap,
+        SlicingReducedInnerWallPurge
     };
 
     typedef size_t TimeStamp;
@@ -610,6 +611,10 @@ protected:
         { return m_state.invalidate_multiple(step_begin, step_end, this->cancel_callback()); }
     bool            invalidate_steps(std::initializer_list<PrintStepEnum> il)
         { return m_state.invalidate_multiple(il.begin(), il.end(), this->cancel_callback()); }
+    // Worker-only two-pass geometry rebuild. The caller holds state_mutex and
+    // no UI invalidation is in flight; do not cancel the worker from itself.
+    bool invalidate_steps_for_recompute(std::initializer_list<PrintStepEnum> steps)
+        { return m_state.invalidate_multiple(steps.begin(), steps.end(), [](){}); }
     bool            invalidate_all_steps()
         { return m_state.invalidate_all(this->cancel_callback()); }
 
@@ -652,6 +657,10 @@ protected:
         { return m_state.invalidate_multiple(step_begin, step_end, PrintObjectBase::cancel_callback(m_print)); }
     bool            invalidate_steps(std::initializer_list<PrintObjectStepEnum> il)
         { return m_state.invalidate_multiple(il.begin(), il.end(), PrintObjectBase::cancel_callback(m_print)); }
+    // Worker-only two-pass geometry rebuild. The caller holds state_mutex and
+    // no UI invalidation is in flight; do not cancel the worker from itself.
+    bool invalidate_steps_for_recompute(std::initializer_list<PrintObjectStepEnum> steps)
+        { return m_state.invalidate_multiple(steps.begin(), steps.end(), [](){}); }
     bool            invalidate_all_steps()
         { return m_state.invalidate_all(PrintObjectBase::cancel_callback(m_print)); }
     bool            invalidate_all_steps_without_cancel()

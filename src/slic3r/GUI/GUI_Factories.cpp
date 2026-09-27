@@ -65,7 +65,7 @@ static SettingsFactory::Bundle FREQ_SETTINGS_BUNDLE_FFF =
                                     "support_remove_small_overhang",
                                     "support_base_pattern_spacing", "support_expansion"}},
     //BBS
-    { L("Flush options")         , { "flush_into_infill", "flush_into_objects", "flush_into_support"} }
+    { L("Flush options")         , { "flush_into_infill", "flush_into_objects", "flush_into_support", "flush_into_inner_walls", "flush_inner_walls_max_extra_loops"} }
 };
 
 // pt_SLA
@@ -1128,10 +1128,24 @@ void MenuFactory::append_menu_items_flush_options(wxMenu* menu)
     ModelConfig& select_object_config = object_list->object(selection.get_object_idx())->config;
 
     wxMenu* flush_options_menu = new wxMenu();
-    auto can_flush = [&global_config]() {
-        auto option = global_config.option("enable_prime_tower");
-        return option ? option->getBool() : false;
+    auto can_flush = [&global_config, &select_object_config]() {
+        auto tower = global_config.option("enable_prime_tower");
+        auto walls = select_object_config.option("flush_into_inner_walls");
+        if (!walls) walls = global_config.option("flush_into_inner_walls");
+        return (tower && tower->getBool()) || (walls && walls->getBool());
     };
+    append_menu_check_item(flush_options_menu, wxID_ANY, _L("Flush into inner walls"), "",
+        [&select_object_config, &global_config](wxCommandEvent&) {
+            const auto *option = select_object_config.option("flush_into_inner_walls");
+            if (!option) option = global_config.option("flush_into_inner_walls");
+            select_object_config.set_key_value("flush_into_inner_walls", new ConfigOptionBool(!option->getBool()));
+            wxGetApp().obj_settings()->UpdateAndShow(true);
+        }, menu, []() { return true; },
+        [&select_object_config, &global_config]() {
+            const auto *option = select_object_config.option("flush_into_inner_walls");
+            if (!option) option = global_config.option("flush_into_inner_walls");
+            return option->getBool();
+        }, m_parent);
     append_menu_check_item(flush_options_menu, wxID_ANY, _L("Flush into objects' infill"), "",
         [&select_object_config, &global_config](wxCommandEvent&) {
             const ConfigOption* option = select_object_config.option(FREQ_SETTINGS_BUNDLE_FFF["Flush options"][0]);

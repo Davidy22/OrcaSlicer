@@ -80,6 +80,13 @@ public:
     const ExPolygons            *lower_slices;
     double                       layer_height;
     int                          layer_id;
+    // Bounded, layer-local input from a geometry-verified purge plan. Zero keeps
+    // the normal wall generator unchanged; wall_loops is never modified.
+    int                          extra_purge_wall_loops = 0;
+    // Updated per surface, including its ordinary/alternating extra walls.
+    // Only the additional purge/support insets bypass surface texturing.
+    int                          first_purge_inset = -1;
+    bool is_purge_inset(size_t inset) const { return first_purge_inset >= 0 && inset >= size_t(first_purge_inset); }
     coordf_t                     slice_z;
     Flow                         perimeter_flow;
     Flow                         ext_perimeter_flow;

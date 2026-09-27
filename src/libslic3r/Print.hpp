@@ -815,6 +815,13 @@ private:
 	WipeTowerData &operator=(const WipeTowerData & /* rhs */) = delete;
 };
 
+struct PurgeInnerWallStatistics
+{
+    double requested = 0., inner_walls = 0., other = 0., tower = 0., reduced = 0., max_shortfall = 0.;
+    std::set<std::tuple<const PrintObject *, int, double>> affected_layers;
+    std::set<std::pair<unsigned int, unsigned int>> affected_pairs;
+};
+
 struct PrintStatistics
 {
     PrintStatistics() { clear(); }
@@ -1025,6 +1032,16 @@ public:
     // therefore it does NOT encompass the initial purge line.
     // It does NOT encompass MMU/MMU2 starting (wipe) areas.
     const Polygon&                   first_layer_convex_hull() const { return m_first_layer_convex_hull; }
+
+    bool flush_into_inner_walls() const;
+    float purge_volume_for_transition(unsigned int old_filament, unsigned int new_filament) const;
+    void prepare_inner_wall_purge();
+    void plan_towerless_inner_wall_purge(LayerTools &layer, unsigned int &current,
+                                        const PrintObject *only_object = nullptr, int only_copy = -1);
+    void record_inner_wall_purge(double z, unsigned int old_filament, unsigned int new_filament,
+                                 const PurgeVolumeAllocation &allocation, const PrintObject *object = nullptr, int copy = -1);
+    PurgeInnerWallStatistics inner_wall_purge_statistics() const;
+    void warn_about_reduced_inner_wall_purge();
 
     const PrintStatistics&      print_statistics() const { return m_print_statistics; }
     PrintStatistics&            print_statistics() { return m_print_statistics; }
@@ -1362,6 +1379,9 @@ private:
 
     // Estimated print time, filament consumed.
     PrintStatistics                         m_print_statistics;
+    using PurgeTransitionKey = std::tuple<const PrintObject *, int, double, unsigned int, unsigned int>;
+    mutable std::mutex m_inner_wall_purge_mutex;
+    std::map<PurgeTransitionKey, PurgeVolumeAllocation> m_inner_wall_purge_transitions;
     bool                                    m_support_used {false};
     StatisticsByExtruderCount               m_statistics_by_extruder_count;
 

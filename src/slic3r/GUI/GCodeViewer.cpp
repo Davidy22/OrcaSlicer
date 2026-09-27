@@ -4595,6 +4595,27 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
     }
 
 
+    if (wxGetApp().is_editor()) {
+        const Print &print = wxGetApp().plater()->get_partplate_list().get_current_fff_print();
+        const auto purge = print.inner_wall_purge_statistics();
+        if (print.flush_into_inner_walls() && purge.requested > 0.) {
+            ImGui::Spacing();
+            imgui.title(_u8L("Purge allocation (mm³)"), true);
+            const std::pair<std::string, double> rows[] = {
+                {_u8L("Requested"), purge.requested},
+                {_u8L("Inner walls"), purge.inner_walls},
+                {_u8L("Objects / infill / support"), purge.other},
+                {_u8L("Tower / printer purge"), purge.tower},
+                {_u8L("Reduced purge"), purge.reduced}
+            };
+            for (const auto &[label, volume] : rows) {
+                char value[64];
+                ::snprintf(value, sizeof(value), "%.2f", volume);
+                imgui.text(label + ": " + value);
+            }
+        }
+    }
+
     // total estimated printing time section
     ImGui::Spacing();
     std::string time_title = m_viewer.get_view_type() == libvgcode::EViewType::FeatureType ? _u8L("Total estimation") : _u8L("Time Estimation");
