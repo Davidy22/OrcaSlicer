@@ -5,6 +5,7 @@
 #include "BoundingBox.hpp"
 #include "Flow.hpp"
 #include "SurfaceCollection.hpp"
+#include "PurgeInnerWallPlan.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include "BoundingBox.hpp"
 namespace Slic3r {
@@ -72,6 +73,9 @@ public:
     // ordered collection of extrusion paths/loops to build all perimeters
     // (this collection contains only ExtrusionEntityCollection objects)
     ExtrusionEntityCollection   perimeters;
+
+    // Local geometry plan, regenerated from the current tool-ordering demand.
+    PurgeInnerWallPlan          purge_inner_wall_plan;
 
     // ordered collection of extrusion paths to fill surfaces
     // (this collection contains only ExtrusionEntityCollection objects)

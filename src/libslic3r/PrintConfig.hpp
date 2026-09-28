@@ -1193,6 +1193,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                flush_into_objects))
     // BBS
     ((ConfigOptionBool,                flush_into_infill))
+    ((ConfigOptionBool,                flush_into_inner_walls))
+    ((ConfigOptionInt,                 flush_inner_walls_max_extra_loops))
     ((ConfigOptionBool,                flush_into_support))
     // BBS
     ((ConfigOptionFloat,              tree_support_branch_distance))

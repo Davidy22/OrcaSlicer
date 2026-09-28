@@ -7,6 +7,9 @@
 
 namespace Slic3r {
 
+// A verified loop, or a singleton collection containing it; never a mixed island.
+bool is_purge_inner_wall(const ExtrusionEntity &entity);
+
 // Remove those items from extrusion_entities, that do not match role.
 // Do nothing if role is mixed.
 // Removed elements are NOT being deleted.
@@ -26,20 +29,27 @@ class ExtrusionEntityCollection : public ExtrusionEntity
 {
 public:
     ExtrusionEntity* clone() const override;
+
+    // Non-owning, innermost-first candidates. This is a provenance/role filter,
+    // NOT a support or visibility test and NOT an island-wide material override.
+    std::vector<const ExtrusionLoop *> purge_inner_wall_candidates() const;
     // Create a new object, initialize it with this object using the move semantics.
 	ExtrusionEntity* clone_move() override { return new ExtrusionEntityCollection(std::move(*this)); }
 
     ExtrusionEntitiesPtr entities;     // we own these entities
     bool no_sort;
+    // Prevent late simplification from changing verified purge/support footprints.
+    bool purge_geometry_locked = false;
     ExtrusionEntityCollection(): no_sort(false) {}
-    ExtrusionEntityCollection(const ExtrusionEntityCollection &other) : no_sort(other.no_sort), is_reverse(other.is_reverse) { this->append(other.entities); }
-    ExtrusionEntityCollection(ExtrusionEntityCollection &&other) : entities(std::move(other.entities)), no_sort(other.no_sort), is_reverse(other.is_reverse) {}
+    ExtrusionEntityCollection(const ExtrusionEntityCollection &other) : no_sort(other.no_sort), purge_geometry_locked(other.purge_geometry_locked), is_reverse(other.is_reverse) { this->append(other.entities); }
+    ExtrusionEntityCollection(ExtrusionEntityCollection &&other) : entities(std::move(other.entities)), no_sort(other.no_sort), purge_geometry_locked(other.purge_geometry_locked), is_reverse(other.is_reverse) {}
     explicit ExtrusionEntityCollection(const ExtrusionPaths &paths);
     ExtrusionEntityCollection& operator=(const ExtrusionEntityCollection &other);
     ExtrusionEntityCollection& operator=(ExtrusionEntityCollection &&other)
     {
         this->entities = std::move(other.entities);
         this->no_sort  = other.no_sort;
+        this->purge_geometry_locked = other.purge_geometry_locked;
         is_reverse     = other.is_reverse;
         return *this;
     }

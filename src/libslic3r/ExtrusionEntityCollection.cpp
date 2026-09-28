@@ -6,6 +6,16 @@
 
 namespace Slic3r {
 
+bool is_purge_inner_wall(const ExtrusionEntity &entity)
+{
+    if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity))
+        return loop->generated_for_purge && loop->purge_safe && loop->inset_idx > 0 && !loop->print_after_infill &&
+               !loop->paths.empty() && std::all_of(loop->paths.begin(), loop->paths.end(), [](const auto &path) { return path.role() == erPerimeter; });
+    if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(&entity))
+        return collection->entities.size() == 1 && is_purge_inner_wall(*collection->entities.front());
+    return false;
+}
+
 void filter_by_extrusion_role_in_place(ExtrusionEntitiesPtr &extrusion_entities, ExtrusionRole role)
 {
 	if (role != erMixed) {
@@ -31,6 +41,7 @@ ExtrusionEntityCollection& ExtrusionEntityCollection::operator=(const ExtrusionE
     for (size_t i = 0; i < this->entities.size(); ++i)
         this->entities[i] = this->entities[i]->clone();
     this->no_sort       = other.no_sort;
+    this->purge_geometry_locked = other.purge_geometry_locked;
     return *this;
 }
 
@@ -38,6 +49,7 @@ void ExtrusionEntityCollection::swap(ExtrusionEntityCollection &c)
 {
     std::swap(this->entities, c.entities);
     std::swap(this->no_sort, c.no_sort);
+    std::swap(this->purge_geometry_locked, c.purge_geometry_locked);
 }
 
 void ExtrusionEntityCollection::clear()
@@ -45,6 +57,7 @@ void ExtrusionEntityCollection::clear()
 	for (size_t i = 0; i < this->entities.size(); ++i)
 		delete this->entities[i];
     this->entities.clear();
+    this->purge_geometry_locked = false;
 }
 
 ExtrusionEntityCollection::operator ExtrusionPaths() const
@@ -60,6 +73,29 @@ ExtrusionEntityCollection::operator ExtrusionPaths() const
 ExtrusionEntity *ExtrusionEntityCollection::clone() const
 {
     return new ExtrusionEntityCollection(*this);
+}
+
+std::vector<const ExtrusionLoop *> ExtrusionEntityCollection::purge_inner_wall_candidates() const
+{
+    std::vector<const ExtrusionLoop *> candidates;
+    const auto collect = [&candidates](const auto &self, const ExtrusionEntityCollection &collection) -> void {
+        for (const ExtrusionEntity *entity : collection.entities) {
+            if (const auto *nested = dynamic_cast<const ExtrusionEntityCollection *>(entity)) {
+                self(self, *nested);
+            } else if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(entity)) {
+                // role() on a loop reports only its FIRST path. Test every path
+                // to avoid accepting loops that contain an overhang or bridge.
+                if (loop->generated_for_purge && loop->inset_idx > 0 && !loop->print_after_infill && !loop->paths.empty() &&
+                    std::all_of(loop->paths.begin(), loop->paths.end(), [](const ExtrusionPath &path) { return path.role() == erPerimeter; }))
+                    candidates.push_back(loop);
+            }
+        }
+    };
+    collect(collect, *this);
+    std::stable_sort(candidates.begin(), candidates.end(), [](const ExtrusionLoop *a, const ExtrusionLoop *b) {
+        return a->inset_idx > b->inset_idx;
+    });
+    return candidates;
 }
 
 void ExtrusionEntityCollection::reverse()

@@ -474,6 +474,11 @@ void PrintObject::make_perimeters()
         m_typed_slices = false;
     }
 
+    // A new perimeter pass starts from the user's geometry, never a stale purge plan.
+    for (Layer *layer : m_layers)
+        for (LayerRegion *region : layer->regions())
+            region->purge_inner_wall_plan = {};
+
     // compare each layer to the one below, and mark those slices needing
     // one additional inner perimeter, like the top of domed objects-
 
@@ -1198,6 +1203,10 @@ bool PrintObject::invalidate_state_by_config_options(
     std::vector<PrintObjectStep> steps;
     bool invalidated = false;
     for (const t_config_option_key &opt_key : opt_keys) {
+        if (m_print->flush_into_inner_walls() &&
+            (opt_key == "print_flow_ratio" || opt_key == "inner_wall_flow_ratio" ||
+             opt_key == "filament_flow_ratio" || opt_key == "set_other_flow_ratios"))
+            invalidated |= m_print->invalidate_step(psWipeTower);
         if (   opt_key == "brim_width"
             || opt_key == "brim_object_gap"
             || opt_key == "brim_use_efc_outline"
@@ -1579,6 +1588,10 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "wipe_inward_distance"
             || opt_key == "spiral_starting_flow_ratio"
             || opt_key == "spiral_finishing_flow_ratio") {
+            invalidated |= m_print->invalidate_step(psGCodeExport);
+        } else if (opt_key == "flush_into_inner_walls" || opt_key == "flush_inner_walls_max_extra_loops") {
+            steps.emplace_back(posPerimeters);
+            invalidated |= m_print->invalidate_step(psWipeTower);
             invalidated |= m_print->invalidate_step(psGCodeExport);
         } else if (
                opt_key == "flush_into_infill"

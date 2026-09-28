@@ -3896,7 +3896,14 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
                             m_filament_instances_code = _encode_label_ids_to_base64({(*print_object_instance_sequential_active)->model_instance->get_labeled_id()});
                         }
 
+                        if (print.flush_into_inner_walls() && !print.has_wipe_tower() && m_writer.filament()) {
+                            // The actual change happens here, before process_layer.
+                            // Carry its old filament into that layer's allocator.
+                            m_inner_wall_initial_filament = m_writer.filament()->id();
+                            m_inner_wall_toolchange = true;
+                        }
                         file.write(this->set_extruder(initial_extruder_id, initial_layer_print_height, true));
+                        m_inner_wall_toolchange = false;
                         prime_extruder = true;
                     } else {
                         file.write(this->retract());
@@ -4129,6 +4136,12 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
         // Const input (tool-change fallback for non-wipe-tower prints)
         print.tool_ordering()));
     print.m_print_statistics.initial_tool = initial_extruder_id;
+    if (print.flush_into_inner_walls()) {
+        const auto purge = print.inner_wall_purge_statistics();
+        file.write_format("; purge requested [mm3] = %.3f\n; purge into inner walls [mm3] = %.3f\n; purge into objects/infill/support [mm3] = %.3f\n; purge to tower [mm3] = %.3f\n; purge reduced [mm3] = %.3f\n",
+                          purge.requested, purge.inner_walls, purge.other, purge.tower, purge.reduced);
+        const_cast<Print &>(print).warn_about_reduced_inner_wall_purge();
+    }
     if (!is_bbl_printers) {
         file.write_format("; total filament used [g] = %.2lf\n",
             print.m_print_statistics.total_weight);
@@ -5876,6 +5889,15 @@ LayerResult GCode::process_layer(
     // existing support-extruder assignment; unused (and thus output-neutral) when the subsystem is off.
     std::map<std::pair<const SupportLayer *, ExtrusionRole>, unsigned int> support_filaments;
     std::vector<std::unique_ptr<ExtrusionEntityCollection>> split_perimeter_storage;
+    // Reconcile the actual starting filament, also for sequential copies. The
+    // allocator is run before grouping geometry and uses only this copy there.
+    if (print.flush_into_inner_walls() && !print.has_wipe_tower() && !layer_tools.extruders.empty()) {
+        unsigned int current = m_inner_wall_initial_filament.value_or(m_writer.filament() ? m_writer.filament()->id() : layer_tools.extruders.front());
+        m_inner_wall_initial_filament.reset();
+        const PrintObject *object = single_object_instance_idx == size_t(-1) ? nullptr : layers.front().original_object;
+        const_cast<Print &>(print).plan_towerless_inner_wall_purge(const_cast<LayerTools &>(layer_tools), current, object,
+            single_object_instance_idx == size_t(-1) ? -1 : int(single_object_instance_idx));
+    }
     bool is_anything_overridden = const_cast<LayerTools&>(layer_tools).wiping_extrusions().is_anything_overridden();
     for (const LayerToPrint &layer_to_print : layers) {
         if (layer_to_print.support_layer != nullptr) {
@@ -6102,7 +6124,8 @@ LayerResult GCode::process_layer(
                         bool split_mixed_perimeters =
                             entity_type == ObjectByExtruder::Island::Region::PERIMETERS &&
                             region.config().outer_wall_filament_id.value != region.config().inner_wall_filament_id.value &&
-                            extrusions->role() == erMixed;
+                            extrusions->role() == erMixed &&
+                            !(print.flush_into_inner_walls() && layer_to_print.original_object->config().flush_into_objects);
 
                         if (split_mixed_perimeters) {
                             auto outer_perimeters = std::make_unique<ExtrusionEntityCollection>();
@@ -6423,7 +6446,9 @@ LayerResult GCode::process_layer(
                 has_insert_wrapping_detection_gcode = true;
             }
 
+            m_inner_wall_toolchange = print.flush_into_inner_walls() && !print.has_wipe_tower();
             gcode_toolchange = this->set_extruder(extruder_id, print_z);
+            m_inner_wall_toolchange = false;
         }
 
         if (!gcode_toolchange.empty()) {
@@ -6441,17 +6466,23 @@ LayerResult GCode::process_layer(
         std::vector<InstanceToPrint>     &instances_to_print = filament_plan.first;
         const std::vector<InstanceVisit> &instance_visits    = filament_plan.second;
 
-        // We are almost ready to print. However, we must go through all the objects twice to print the overridden extrusions first (infill/perimeter wiping feature):
+        // Preserve legacy two-pass wiping unless inner-wall purging is enabled:
+        // dedicated purge objects, added walls, other overrides, normal geometry.
         std::vector<ObjectByExtruder::Island::Region> by_region_per_copy_cache;
-        for (int print_wipe_extrusions = is_anything_overridden; print_wipe_extrusions>=0; --print_wipe_extrusions) {
+        for (int print_wipe_extrusions = is_anything_overridden ? (print.flush_into_inner_walls() ? 3 : 1) : 0; print_wipe_extrusions>=0; --print_wipe_extrusions) {
+            if (print_wipe_extrusions == 3)
+                gcode += "; PURGE OBJECTS\n";
             if (is_anything_overridden && print_wipe_extrusions == 0)
                 gcode+="; PURGING FINISHED\n";
 
             for (const InstanceVisit &visit : instance_visits) {
                 InstanceToPrint &instance_to_print = instances_to_print[visit.instance_idx];
+                if (print.flush_into_inner_walls() && print_wipe_extrusions > 0 &&
+                    (print_wipe_extrusions == 3) != instance_to_print.print_object.config().flush_into_objects.value)
+                    continue;
                 const auto& inst = instance_to_print.print_object.instances()[instance_to_print.instance_id];
                 const LayerToPrint &layer_to_print = layers[instance_to_print.layer_id];
-                if (visit.first_visit && print_wipe_extrusions == (is_anything_overridden ? 1 : 0)) {
+                if (visit.first_visit && print_wipe_extrusions == (print.flush_into_inner_walls() ? 0 : (is_anything_overridden ? 1 : 0))) {
                     gcode += generate_object_skirt_group(print, instance_to_print.print_object, instance_to_print.instance_id, layer_tools, layer, extruder_id);
                     gcode += generate_object_brim(print, instance_to_print.print_object, instance_to_print.instance_id, first_layer);
                 }
@@ -6524,7 +6555,7 @@ LayerResult GCode::process_layer(
 
                     ExtrusionRole support_extrusion_role = instance_to_print.object_by_extruder.support_extrusion_role;
                     bool is_overridden = support_extrusion_role == erSupportMaterialInterface ? support_intf_overridden : support_overridden;
-                    if (is_overridden == (print_wipe_extrusions != 0)) {
+                    if (print_wipe_extrusions != 2 && is_overridden == (print_wipe_extrusions > 0)) {
                         gcode += this->extrude_support(
                             // support_extrusion_role is erSupportMaterial, erSupportTransition, erSupportMaterialInterface or erMixed for all extrusion paths.
                             *instance_to_print.object_by_extruder.support, support_extrusion_role);
@@ -6574,7 +6605,7 @@ LayerResult GCode::process_layer(
                 }
                 for (size_t island_idx : island_order) {
                     ObjectByExtruder::Island &island = islands[island_idx];
-                    const auto& by_region_specific = is_anything_overridden ? island.by_region_per_copy(by_region_per_copy_cache, static_cast<unsigned int>(instance_to_print.instance_id), extruder_id, print_wipe_extrusions != 0) : island.by_region;
+                    const auto& by_region_specific = is_anything_overridden ? island.by_region_per_copy(by_region_per_copy_cache, static_cast<unsigned int>(instance_to_print.instance_id), extruder_id, print_wipe_extrusions) : island.by_region;
                     // When starting a new object, use the external motion planner for the first travel move.
                     const Point& offset = instance_to_print.print_object.instances()[instance_to_print.instance_id].shift;
                     std::pair<const PrintObject*, Point> this_object_copy(&instance_to_print.print_object, offset);
@@ -6591,7 +6622,31 @@ LayerResult GCode::process_layer(
                         }
                         return false;
                     };
-                    {
+                    if (print_wipe_extrusions == 2) {
+                        std::vector<std::tuple<int, size_t, ExtrusionEntity *>> purge_order;
+                        for (size_t r = 0; r < by_region_specific.size(); ++r)
+                            for (ExtrusionEntity *entity : by_region_specific[r].perimeters) {
+                                const ExtrusionEntity *loop = entity;
+                                while (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(loop))
+                                    loop = collection->entities.front();
+                                purge_order.emplace_back(loop->inset_idx, r, entity);
+                            }
+                        std::stable_sort(purge_order.begin(), purge_order.end(), [](const auto &a, const auto &b) {
+                            return std::get<0>(a) > std::get<0>(b);
+                        });
+                        std::vector<ObjectByExtruder::Island::Region> purge_regions(by_region_specific.size());
+                        gcode += "; PURGE INNER WALLS\n";
+                        for (const auto &[inset, region_id, entity] : purge_order) {
+                            purge_regions[region_id].perimeters.push_back(entity);
+                            gcode += "; PURGE INNER WALL inset=" + std::to_string(inset) + "\n";
+                            // Keep the original region index/configuration but
+                            // ignore inter-region infill-first ordering here.
+                            gcode += this->extrude_perimeters(print, purge_regions, first_layer, false);
+                            gcode += this->extrude_perimeters(print, purge_regions, first_layer, true);
+                            purge_regions[region_id].perimeters.clear();
+                        }
+                        gcode += "; END PURGE INNER WALLS\n";
+                    } else {
                         // Print perimeters of regions that has is_infill_first == false
                         gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false);
                         if (!has_wipe_tower && need_insert_timelapse_gcode_for_traditional && printer_structure == PrinterStructure::psI3
@@ -7281,7 +7336,7 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
         loop.split_at(last_pos, false);
 
     const auto seam_scarf_type = m_config.seam_slope_type.value;
-    bool enable_seam_slope = ((seam_scarf_type == SeamScarfType::External && !is_hole) || seam_scarf_type == SeamScarfType::All) &&
+    bool enable_seam_slope = !(loop.generated_for_purge || loop.purge_support) && ((seam_scarf_type == SeamScarfType::External && !is_hole) || seam_scarf_type == SeamScarfType::All) &&
         !m_config.spiral_mode &&
         (loop.role() == erExternalPerimeter || (loop.role() == erPerimeter && m_config.seam_slope_inner_walls)) &&
         layer_id() > 0;
@@ -7299,7 +7354,7 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
     // clip the path to avoid the extruder to get exactly on the first point of the loop;
     // if polyline was shorter than the clipping distance we'd get a null polyline, so
     // we discard it in that case
-    const double seam_gap = scale_(m_config.seam_gap.get_abs_value(nozzle_diameter));
+    const double seam_gap = (loop.generated_for_purge || loop.purge_support) ? 0. : scale_(m_config.seam_gap.get_abs_value(nozzle_diameter));
     const bool seam_gap_applied = enable_seam_slope || m_enable_loop_clipping;
     const double seam_gap_distance_mm = seam_gap_applied ? unscale_(seam_gap) : 0.0;
     double seam_scarf_distance_mm = 0.0;
@@ -9580,6 +9635,13 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
         wipe_volume = 0.f;
         old_filament_e_feedrate = 200;
     }
+    // This transition was allocated before grouping the layer. All effective
+    // purge is printed by the overrides; any unabsorbed part was explicitly
+    // reduced and reported. Do not duplicate it in the tool-change macro/chute.
+    if (m_inner_wall_toolchange) {
+        wipe_volume = 0.f;
+        gcode += "; purge allocated to hidden geometry (see purge statistics)\n";
+    }
     float wipe_length = wipe_volume / filament_area;
     int new_filament_e_feedrate = (int)(60.0 * m_config.filament_max_volumetric_speed.get_at(new_fi) / filament_area);
     new_filament_e_feedrate = new_filament_e_feedrate == 0 ? 100 : new_filament_e_feedrate;
@@ -9705,7 +9767,7 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
     dyn_config.set_key_value("flush_length", new ConfigOptionFloat(wipe_length));
 
     int flush_count = std::min(g_max_flush_count, (int)std::round(wipe_volume / g_purge_volume_one_time));
-    float flush_unit = wipe_length / flush_count;
+    float flush_unit = flush_count > 0 ? wipe_length / flush_count : 0.f;
     int flush_idx = 0;
     for (; flush_idx < flush_count; flush_idx++) {
         char key_value[64] = { 0 };
@@ -9952,7 +10014,7 @@ Vec3d GCode::point_to_gcode_quantized(const Point3& point) const
 // Goes through by_region std::vector and returns reference to a subvector of entities, that are to be printed
 // during infill/perimeter wiping, or normally (depends on wiping_entities parameter)
 // Fills in by_region_per_copy_cache and returns its reference.
-const std::vector<GCode::ObjectByExtruder::Island::Region>& GCode::ObjectByExtruder::Island::by_region_per_copy(std::vector<Region> &by_region_per_copy_cache, unsigned int copy, unsigned int extruder, bool wiping_entities) const
+const std::vector<GCode::ObjectByExtruder::Island::Region>& GCode::ObjectByExtruder::Island::by_region_per_copy(std::vector<Region> &by_region_per_copy_cache, unsigned int copy, unsigned int extruder, int wiping_pass) const
 {
     bool has_overrides = false;
     for (const auto& reg : by_region)
@@ -9966,7 +10028,7 @@ const std::vector<GCode::ObjectByExtruder::Island::Region>& GCode::ObjectByExtru
 
     if (! has_overrides)
         // Simple case. No need to copy the regions.
-        return wiping_entities ? by_region_per_copy_cache : this->by_region;
+        return wiping_pass ? by_region_per_copy_cache : this->by_region;
 
     // Complex case. Some of the extrusions of some object instances are to be printed first - those are the wiping extrusions.
     // Some of the extrusions of some object instances are printed later - those are the clean print extrusions.
@@ -9984,12 +10046,13 @@ const std::vector<GCode::ObjectByExtruder::Island::Region>& GCode::ObjectByExtru
 
             // Now the most important thing - which extrusion should we print.
             // See function ToolOrdering::get_extruder_overrides for details about the negative numbers hack.
-            if (wiping_entities) {
+            if (wiping_pass) {
                 // Apply overrides for this region.
                 for (unsigned int i = 0; i < overrides.size(); ++ i) {
                     const WipingExtrusions::ExtruderPerCopy *this_override = overrides[i];
                     // This copy (aka object instance) should be printed with this extruder, which overrides the default one.
-                    if (this_override != nullptr && (*this_override)[copy] == int(extruder))
+                    if (this_override != nullptr && (*this_override)[copy] == int(extruder) &&
+                        (wiping_pass == 3 || is_purge_inner_wall(*entities[i]) == (wiping_pass == 2)))
                         target_eec.emplace_back(entities[i]);
                 }
             } else {

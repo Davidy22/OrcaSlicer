@@ -28,6 +28,14 @@ class PrintRegion;
 // Object of this class holds information about whether an extrusion is printed immediately
 // after a toolchange (as part of infill/perimeter wiping) or not. One extrusion can be a part
 // of several copies - this has to be taken into account.
+struct PurgeVolumeAllocation
+{
+    double requested = 0.;
+    double inner_walls = 0.;
+    double other = 0.;
+    double remaining = 0.;
+};
+
 class WipingExtrusions
 {
 public:
@@ -45,9 +53,20 @@ public:
 
     // This function goes through all infill entities, decides which ones will be used for wiping and
     // marks them by the extruder id. Returns volume that remains to be wiped on the wipe tower:
-    float mark_wiping_extrusions(const Print& print, unsigned int old_extruder, unsigned int new_extruder, float volume_to_wipe);
+    float mark_wiping_extrusions(const Print& print, unsigned int old_extruder, unsigned int new_extruder, float volume_to_wipe,
+                                const PrintObject *only_object = nullptr, int only_copy = -1);
+    float mark_dedicated_purge(const Print &print, unsigned int old_extruder, unsigned int new_extruder, float volume,
+                                const PrintObject *object = nullptr) {
+        return mark_wiping_extrusions_impl(print, old_extruder, new_extruder, volume, object, object ? 0 : -1, true);
+    }
+    PurgeVolumeAllocation last_purge_allocation;
+    void reset_overrides(const LayerTools *layer_tools) {
+        entity_map.clear(); support_map.clear(); support_intf_map.clear();
+        something_overridden = false; something_overridable = true;
+        m_layer_tools = layer_tools;
+    }
 
-    void ensure_perimeters_infills_order(const Print& print);
+    void ensure_perimeters_infills_order(const Print& print, const PrintObject *only_object = nullptr, int only_copy = -1);
 
     bool is_overriddable(const ExtrusionEntityCollection& ee, const PrintConfig& print_config, const PrintObject& object, const PrintRegion& region) const;
     bool is_overriddable_and_mark(const ExtrusionEntityCollection& ee, const PrintConfig& print_config, const PrintObject& object, const PrintRegion& region) {
@@ -75,6 +94,10 @@ public:
     void set_layer_tools_ptr(const LayerTools* lt) { m_layer_tools = lt; }
 
 private:
+    float mark_wiping_extrusions_impl(const Print& print, unsigned int old_extruder, unsigned int new_extruder, float volume,
+                                     const PrintObject *only_object, int only_copy, bool dedicated_only);
+    float mark_inner_walls(const Print& print, unsigned int old_extruder, unsigned int new_extruder, float volume,
+                           const PrintObject *only_object, int only_copy);
     int first_nonsoluble_extruder_on_layer(const PrintConfig& print_config) const;
     int last_nonsoluble_extruder_on_layer(const PrintConfig& print_config) const;
 

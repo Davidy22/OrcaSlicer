@@ -88,6 +88,8 @@ void Print::clear()
     m_print_regions.clear();
     m_model.clear_objects();
     m_statistics_by_extruder_count.clear();
+    std::scoped_lock purge_lock(m_inner_wall_purge_mutex);
+    m_inner_wall_purge_transitions.clear();
 }
 
 bool Print::has_tpu_filament() const
@@ -271,6 +273,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
     bool invalidated = false;
 
     for (const t_config_option_key &opt_key : opt_keys) {
+        if (flush_into_inner_walls() && opt_key == "filament_flow_ratio")
+            steps.emplace_back(psWipeTower);
         if (steps_gcode.find(opt_key) != steps_gcode.end()) {
             // These options only affect G-code export or they are just notes without influence on the generated G-code,
             // so there is nothing to invalidate.
@@ -1728,6 +1732,9 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
 
+    if (flush_into_inner_walls() && (m_config.spiral_mode || nozzles != 1 || m_config.enable_mixed_color_sublayer))
+        return {L("Flush into inner walls requires a single physical nozzle, normal layers, and mixed-color sublayers disabled."), nullptr, "flush_into_inner_walls"};
+
     // Orca: a gradient mixed filament only renders its gradient with "Mixed color sublayer" on;
     // without it ToolOrdering::resolve_mixed_filaments prints one whole component per layer and
     // the gradient is dropped silently. extruders() already covers painting, height ranges,
@@ -2699,6 +2706,9 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 
     //add the print_object share check logic
     auto is_print_object_the_same = [](const PrintObject* object1, const PrintObject* object2) -> bool{
+        // Purge plans depend on copies, transitions and layer-local geometry.
+        if (object1->config().flush_into_inner_walls || object2->config().flush_into_inner_walls)
+            return false;
         if (object1->trafo().matrix() != object2->trafo().matrix())
             return false;
         const ModelObject* model_obj1 = object1->model_object();
@@ -2970,6 +2980,9 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 
 
 
+    if (!this->is_step_done(psWipeTower))
+        this->prepare_inner_wall_purge();
+
     if (this->set_started(psWipeTower)) {
         {
             std::vector<std::set<int>> geometric_unprintables(m_config.nozzle_diameter.size());
@@ -2996,6 +3009,24 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             if (m_tool_ordering.empty() || m_tool_ordering.last_extruder() == unsigned(-1))
                 throw Slic3r::SlicingError("The print is empty. The model is not printable with current print settings.");
 
+        }
+        if (flush_into_inner_walls() && !has_wipe_tower()) {
+            if (m_config.print_sequence == PrintSequence::ByObject) {
+                unsigned int current = unsigned(-1);
+                for (PrintObject *object : m_objects)
+                    for (size_t copy = 0; copy < object->instances().size(); ++copy) {
+                        ToolOrdering ordering(*object, current);
+                        ordering.sort_and_build_data(*object, current);
+                        if (current == unsigned(-1)) current = ordering.first_extruder();
+                        for (LayerTools &layer : ordering.layer_tools())
+                            plan_towerless_inner_wall_purge(layer, current, object, int(copy));
+                    }
+            } else {
+                unsigned int current = m_tool_ordering.first_extruder();
+                for (LayerTools &layer : m_tool_ordering.layer_tools())
+                    plan_towerless_inner_wall_purge(layer, current);
+            }
+            warn_about_reduced_inner_wall_purge();
         }
         this->set_done(psWipeTower);
         if (m_pipeline_plugin_active) run_pipeline_hook(SlicingPipelineStepPlugin::psWipeTower, nullptr);
@@ -4598,6 +4629,8 @@ void Print::_make_wipe_tower()
                                 ? m_config.flush_multiplier_fast.get_at(extruder_id)
                                 : m_config.flush_multiplier.get_at(extruder_id);
                             volume_to_purge *= flush_multiplier;
+                            if (flush_into_inner_walls())
+                                volume_to_purge = purge_volume_for_transition(prev_nozzle_filament, filament_id);
                             volume_to_purge = layer_tools.wiping_extrusions().mark_wiping_extrusions(
                                 *this, current_filament_id, filament_id, volume_to_purge);
                         }
@@ -4699,7 +4732,7 @@ void Print::_make_wipe_tower()
             wipe_volumes.push_back(std::vector<float>(flush_matrix.begin()+i*number_of_extruders, flush_matrix.begin()+(i+1)*number_of_extruders));
 
         // Orca: itertate over wipe_volumes and change the non-zero values to the prime_volume
-        if ((!m_config.purge_in_prime_tower || !m_config.single_extruder_multi_material) && is_wipe_tower_type2) {
+        if (!flush_into_inner_walls() && (!m_config.purge_in_prime_tower || !m_config.single_extruder_multi_material) && is_wipe_tower_type2) {
             for (unsigned int i = 0; i < number_of_extruders; ++i) {
                 for (unsigned int j = 0; j < number_of_extruders; ++j) {
                     if (wipe_volumes[i][j] > 0) {
@@ -4736,9 +4769,9 @@ void Print::_make_wipe_tower()
                     if ((first_layer && extruder_id == m_wipe_tower_data.tool_ordering.all_extruders().back()) || extruder_id !=
                         current_extruder_id) {
                         float volume_to_wipe = m_config.prime_volume;
-                        if (m_config.purge_in_prime_tower && m_config.single_extruder_multi_material) {
-                            volume_to_wipe = wipe_volumes[current_extruder_id][extruder_id]; // total volume to wipe after this toolchange
-                            volume_to_wipe *= m_config.flush_multiplier.get_at(0);
+                        if (flush_into_inner_walls() || (m_config.purge_in_prime_tower && m_config.single_extruder_multi_material)) {
+                            volume_to_wipe = flush_into_inner_walls() ? purge_volume_for_transition(current_extruder_id, extruder_id) :
+                                wipe_volumes[current_extruder_id][extruder_id] * m_config.flush_multiplier.get_at(0);
                             // Not all of that can be used for infill purging:
                             volume_to_wipe -= (float) m_config.filament_minimal_purge_on_wipe_tower.get_at(extruder_id);
 

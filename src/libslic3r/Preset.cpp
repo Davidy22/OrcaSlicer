@@ -1202,6 +1202,8 @@ static std::vector<std::string> s_Preset_print_options{
     "compatible_printers_condition",
     "inherits",
     "flush_into_infill",
+    "flush_into_inner_walls",
+    "flush_inner_walls_max_extra_loops",
     "flush_into_objects",
     "flush_into_support",
     "enable_mixed_color_sublayer",
