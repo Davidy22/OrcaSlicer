@@ -727,7 +727,7 @@ TEST_CASE("Mixed sublayers across two heads demand no cross-head purge", "[Purge
     auto config = purge_config_n(3, "classic", 15.);
     apply_mixed_slot(config, "0.6,0.4", false);
     apply_multihead(config, 2, "1,2,1");
-    config.set_deserialize_strict("single_extruder_multi_material", false);
+    config.set_deserialize_strict({{"single_extruder_multi_material", false}});
     Print print;
     Model model;
     init_banded_cube(print, model, config, {{0., 1}, {1.8, 3}});
