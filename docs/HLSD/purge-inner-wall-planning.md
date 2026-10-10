@@ -13,6 +13,9 @@ Normal walls, fills and supports are generated before demand is collected from
 `Print::purge_volume_for_transition()`, also used by the tower-enabled allocator.
 Dedicated purge objects are accounted for before requesting additional walls.
 Sequential printing plans each object's interior transitions separately.
+Transition predecessors come from per-nozzle resident filaments (see
+Multi-head below), and mixed-color sublayers contribute one event per physical
+component band (see Mixed-color sublayers below).
 
 The geometry planner generates and measures additional insets without changing
 `wall_loops` or `sparse_infill_density`. Classic and Arachne receive the local
@@ -78,7 +81,13 @@ Allocation prefers dedicated purge objects, then verified added inner walls
 (sorted innermost first), then existing infill/support options. Soluble and
 support-material transition exclusions remain in effect. The regular tool
 ordering and preview therefore see the incoming material's color without a new
-extrusion role.
+extrusion role. Added-wall capacity and the credits for dedicated objects,
+infill, support body and support interface all use one shared effective-volume
+model: nominal entity volume times the incoming filament flow ratio, the
+region print flow ratio, the role flow ratio (when "other flow ratios" are
+enabled), and — for mixed slots — the target component's sub-layer band
+fraction. Support-body and support-interface overrides are keyed by
+(object, copy), so sequential copies allocate their own support purge.
 
 G-code emission has four passes when this feature has overrides: dedicated
 purge objects, added purge walls, other purge overrides, and normal geometry. The added-wall pass precedes
@@ -107,6 +116,47 @@ include the same accounting. Export reconciles allocations with the actual
 starting filament on each layer and updates records instead of double-counting
 preliminary slicing allocations.
 
-The supported configuration uses one physical nozzle and ordinary planar
-layers. Spiral vase, mixed-color sublayers and multiple physical nozzles are
-explicitly rejected rather than silently generating unverified purge geometry.
+The supported configuration excludes spiral vase: a single continuous outer
+wall leaves no hidden inner wall to purge into, so that combination is a
+truthful validation conflict. Multi-head/multi-nozzle printers and mixed-color
+sublayers are supported (below).
+
+## Multi-head / multi-nozzle
+
+A transition's predecessor is the material resident in the destination
+physical nozzle, never the globally active filament. Per-nozzle occupancy is
+tracked with `MultiNozzleUtils::NozzleStatusRecorder`, keyed by nozzle slot;
+nozzle and extruder resolution reuses `LayeredNozzleGroupResult` (the
+`ToolOrdering`'s own layered result first, then the print-wide result, then the
+static filament map). Switching to an already-loaded head creates no
+contamination purge; a first use into an empty nozzle is loading/priming, not
+contamination. The flush matrix and multiplier are indexed by the destination
+extruder (`Print::purge_volume_for_transition(old, new, extruder_id)`), matching
+`GCode::set_extruder` and the tower path. Type2 towers prime every extruder up
+front; demand collection seeds each nozzle with its last-primed filament, which
+reproduces the single-nozzle behavior exactly. Sequential export keeps its own
+per-nozzle recorder (`Print::m_inner_wall_purge_residents`, reset per export,
+re-seeded from the writer's active filament). The transition identity recorded
+in the statistics is `(object, copy, z, old filament, new filament, destination
+extruder)`, so repeated same-pair events on different nozzles are not merged.
+
+## Mixed-color sublayers
+
+Demand collection iterates the physical components after
+`ToolOrdering::resolve_mixed_filaments` expands `LayerTools::extruders`, so every
+component band is a transition event with the same per-nozzle predecessor model.
+Capacity uses the shared component heights: an entity of a mixed slot is
+credited only its target component's sub-layer band
+(`total_volume * sub_heights[k] / layer_height * flow factors`), the same
+structure the sublayer emitter reads. A nominal loop can serve one transition
+per component (one band each), never one component twice; the allocation is
+recorded in `WipingExtrusions::mixed_purge_map` keyed by (entity, object, copy)
+and component. Mixed-slot entities only serve transitions into their own slot's
+components. Grouping keeps mixed-slot entities under the slot even when
+allocated, so nothing is emitted twice and no component portion is erased. The
+sublayer emitter splits each instance copy's entities per component: the
+allocated loops print first (innermost first) in that component's
+`; PURGE INNER WALLS` pass at the component's actual sub-Z and flow, before the
+component's visible geometry. Towerless component tool changes zero the
+macro/chute purge so it is not duplicated. Gradients ramp the band ratios per
+layer without splitting the slot; the demand structure is unchanged.

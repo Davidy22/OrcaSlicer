@@ -1034,14 +1034,23 @@ public:
     const Polygon&                   first_layer_convex_hull() const { return m_first_layer_convex_hull; }
 
     bool flush_into_inner_walls() const;
-    float purge_volume_for_transition(unsigned int old_filament, unsigned int new_filament) const;
+    // extruder_id selects the per-nozzle flush matrix and multiplier (multi-head
+    // printers index both per destination nozzle/extruder, not globally zero).
+    float purge_volume_for_transition(unsigned int old_filament, unsigned int new_filament, size_t extruder_id = 0) const;
     void prepare_inner_wall_purge();
     void plan_towerless_inner_wall_purge(LayerTools &layer, unsigned int &current,
                                         const PrintObject *only_object = nullptr, int only_copy = -1);
     void record_inner_wall_purge(double z, unsigned int old_filament, unsigned int new_filament,
-                                 const PurgeVolumeAllocation &allocation, const PrintObject *object = nullptr, int copy = -1);
+                                 const PurgeVolumeAllocation &allocation, const PrintObject *object = nullptr, int copy = -1,
+                                 size_t transition_extruder = 0);
     PurgeInnerWallStatistics inner_wall_purge_statistics() const;
     void warn_about_reduced_inner_wall_purge();
+    // Per-physical-nozzle resident filaments for contamination transitions. A
+    // transition's predecessor is the material resident in the destination
+    // nozzle (slot), never the globally active filament: switching to an
+    // already-loaded or empty head creates no contamination purge.
+    void reset_inner_wall_purge_residents();
+    MultiNozzleUtils::NozzleStatusRecorder &inner_wall_purge_residents() { return m_inner_wall_purge_residents; }
 
     const PrintStatistics&      print_statistics() const { return m_print_statistics; }
     PrintStatistics&            print_statistics() { return m_print_statistics; }
@@ -1379,9 +1388,16 @@ private:
 
     // Estimated print time, filament consumed.
     PrintStatistics                         m_print_statistics;
-    using PurgeTransitionKey = std::tuple<const PrintObject *, int, double, unsigned int, unsigned int>;
+    // Transition identity: (object, copy, z, old filament, new filament, destination
+    // extruder). The extruder disambiguates repeated same-pair events that target
+    // different physical nozzles (multi-head) or different mixed components at one
+    // nominal Z, so estimates can be replaced by matching runtime records without
+    // merging distinct events or double-counting.
+    using PurgeTransitionKey = std::tuple<const PrintObject *, int, double, unsigned int, unsigned int, size_t>;
     mutable std::mutex m_inner_wall_purge_mutex;
     std::map<PurgeTransitionKey, PurgeVolumeAllocation> m_inner_wall_purge_transitions;
+    MultiNozzleUtils::NozzleStatusRecorder m_inner_wall_purge_residents;
+    bool                                    m_inner_wall_purge_residents_seeded = false;
     bool                                    m_support_used {false};
     StatisticsByExtruderCount               m_statistics_by_extruder_count;
 

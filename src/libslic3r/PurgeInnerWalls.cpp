@@ -167,20 +167,72 @@ bool Print::flush_into_inner_walls() const
     return std::any_of(m_objects.begin(), m_objects.end(), [](const PrintObject *object) { return object->config().flush_into_inner_walls.value; });
 }
 
-float Print::purge_volume_for_transition(unsigned int old_filament, unsigned int new_filament) const
+float Print::purge_volume_for_transition(unsigned int old_filament, unsigned int new_filament, size_t extruder_id) const
 {
     if (old_filament == new_filament || old_filament == unsigned(-1)) return 0.f;
     const size_t n = m_config.filament_colour.size();
     if (old_filament >= n || new_filament >= n) return 0.f;
-    const auto matrix = get_flush_volumes_matrix(m_config.flush_volumes_matrix.values, 0, m_config.nozzle_diameter.size());
+    // Multi-head printers keep a per-destination-nozzle flush matrix and
+    // multiplier; index both by the destination extruder, never by a global zero.
+    const auto matrix = get_flush_volumes_matrix(m_config.flush_volumes_matrix.values, extruder_id, m_config.nozzle_diameter.size());
     const size_t index = size_t(old_filament) * n + new_filament;
     if (index >= matrix.size()) throw SlicingError("Invalid flush-volume matrix for inner-wall purging.");
     const double multiplier = has_wipe_tower() && wipe_tower_type() != WipeTowerType::Type2 && m_config.prime_volume_mode == PrimeVolumeMode::pvmFast ?
-        m_config.flush_multiplier_fast.get_at(0) : m_config.flush_multiplier.get_at(0);
+        m_config.flush_multiplier_fast.get_at(extruder_id) : m_config.flush_multiplier.get_at(extruder_id);
     const double volume = matrix[index] * multiplier;
     if (!std::isfinite(volume) || volume < 0.) throw SlicingError("Invalid inner-wall purge volume.");
     return float(volume);
 }
+
+void Print::reset_inner_wall_purge_residents()
+{
+    m_inner_wall_purge_residents = MultiNozzleUtils::NozzleStatusRecorder();
+    m_inner_wall_purge_residents_seeded = false;
+}
+
+namespace {
+
+// Resolve the physical nozzle (slot) and the destination extruder for a filament
+// on a layer. Reuses the nozzle-grouping infrastructure: the ToolOrdering's own
+// layered result when an index is known, else the print-wide result, else the
+// static filament map. The nozzle (slot) keys resident-filament occupancy; the
+// extruder indexes the per-nozzle flush matrix and multiplier.
+int purge_nozzle_for_filament(const Print &print, const ToolOrdering *ordering, int layer_idx, unsigned int filament)
+{
+    if (ordering) {
+        const auto &group = ordering->get_layered_nozzle_group_result();
+        if (group.get_layer_count() > 0) {
+            const int nozzle = group.get_nozzle_id(int(filament), layer_idx);
+            if (nozzle >= 0) return nozzle;
+        }
+    }
+    if (auto group = print.get_layered_nozzle_group_result()) {
+        const int nozzle = group->get_nozzle_id(int(filament), -1);
+        if (nozzle >= 0) return nozzle;
+    }
+    return -1;
+}
+
+int purge_extruder_for_filament(const Print &print, const ToolOrdering *ordering, int layer_idx, unsigned int filament)
+{
+    if (ordering) {
+        const auto &group = ordering->get_layered_nozzle_group_result();
+        if (group.get_layer_count() > 0) {
+            const int extruder = group.get_extruder_id(int(filament), layer_idx);
+            if (extruder >= 0) return extruder;
+        }
+    }
+    if (auto group = print.get_layered_nozzle_group_result()) {
+        const int extruder = group->get_extruder_id(int(filament), -1);
+        if (extruder >= 0) return extruder;
+    }
+    const std::vector<int> filament_map = print.get_filament_maps();
+    if (filament < filament_map.size() && filament_map[filament] > 0)
+        return filament_map[filament] - 1;
+    return -1;
+}
+
+} // namespace
 
 void Print::prepare_inner_wall_purge()
 {
@@ -189,8 +241,12 @@ void Print::prepare_inner_wall_purge()
         m_inner_wall_purge_transitions.clear();
     }
     if (!flush_into_inner_walls()) return;
-    if (m_config.spiral_mode || m_config.nozzle_diameter.size() != 1 || m_config.enable_mixed_color_sublayer)
-        throw SlicingError(I18N::translate(L("Flush into inner walls requires a single physical nozzle, normal layers, and mixed-color sublayers disabled.")));
+    // Spiral vase prints a single continuous outer wall: there is no hidden inner
+    // wall to purge into, so the combination is a truthful semantic conflict.
+    // Multi-head/multi-nozzle printers and mixed-color sublayers ARE supported:
+    // transitions are tracked per physical nozzle (see collect_demand below).
+    if (m_config.spiral_mode)
+        throw SlicingError(I18N::translate(L("Flush into inner walls is not compatible with spiral vase mode.")));
 
     set_status(60, L("Planning purge into inner walls"));
     std::vector<PrintObject *> objects;
@@ -246,18 +302,46 @@ void Print::prepare_inner_wall_purge()
     std::map<DemandKey, double> demand;
     std::map<DemandKey, std::vector<double>> transitions;
     auto collect_demand = [&](ToolOrdering &ordering, const PrintObject *only_object) {
-        unsigned int previous = ordering.first_extruder();
-        if (has_wipe_tower() && wipe_tower_type() == WipeTowerType::Type2 && !ordering.all_extruders().empty())
-            previous = ordering.all_extruders().back();
+        // Per-physical-nozzle resident filaments. A transition's predecessor is
+        // the material resident in the destination nozzle: switching to an
+        // already-loaded head creates no contamination purge, and a first use
+        // into an empty nozzle is loading/priming, not contamination.
+        MultiNozzleUtils::NozzleStatusRecorder residents;
+        // Type2 towers prime every extruder up front; each nozzle ends the priming
+        // sequence holding the last filament loaded into it. Seeding the residents
+        // from the priming order reproduces the single-nozzle behaviour exactly
+        // (the one nozzle ends holding the last primed filament) and stays correct
+        // for multi-nozzle priming.
+        if (has_wipe_tower() && wipe_tower_type() == WipeTowerType::Type2 && !ordering.all_extruders().empty()) {
+            for (unsigned int primed : ordering.all_extruders()) {
+                const int nozzle   = purge_nozzle_for_filament(*this, &ordering, -1, primed);
+                const int extruder = purge_extruder_for_filament(*this, &ordering, -1, primed);
+                if (nozzle >= 0) residents.set_nozzle_status(nozzle, int(primed), extruder);
+            }
+        }
+        // Scalar fallback for filaments whose nozzle mapping cannot be resolved.
+        unsigned int scalar_previous = ordering.first_extruder();
+        int layer_idx = -1;
         for (LayerTools &layer : ordering.layer_tools()) {
+            ++layer_idx;
             for (unsigned int next : layer.extruders) {
+                const int nozzle   = purge_nozzle_for_filament(*this, &ordering, layer_idx, next);
+                const int extruder = purge_extruder_for_filament(*this, &ordering, layer_idx, next);
+                unsigned int previous = scalar_previous;
+                size_t matrix_extruder = 0;
+                if (nozzle >= 0 && extruder >= 0) {
+                    previous = residents.is_nozzle_empty(nozzle) ? unsigned(-1)
+                               : unsigned(residents.get_filament_in_nozzle(nozzle));
+                    matrix_extruder = size_t(extruder);
+                    residents.set_nozzle_status(nozzle, int(next), extruder);
+                }
                 const bool safe_materials = previous != unsigned(-1) && !m_config.filament_soluble.get_at(previous) &&
                     !m_config.filament_soluble.get_at(next) && !m_config.filament_is_support.get_at(previous) && !m_config.filament_is_support.get_at(next);
-                const float requested = safe_materials ? purge_volume_for_transition(previous, next) : 0.f;
+                const float requested = safe_materials ? purge_volume_for_transition(previous, next, matrix_extruder) : 0.f;
                 const float left = layer.wiping_extrusions().mark_dedicated_purge(*this, previous, next, requested, only_object);
                 demand[{only_object, layer.print_z}] += left;
                 if (left > EPSILON) transitions[{only_object, layer.print_z}].push_back(left);
-                previous = next;
+                scalar_previous = next;
             }
         }
     };
@@ -508,7 +592,8 @@ void Print::prepare_inner_wall_purge()
 }
 
 void Print::record_inner_wall_purge(double z, unsigned int old_filament, unsigned int new_filament,
-                                    const PurgeVolumeAllocation &allocation, const PrintObject *object, int copy)
+                                    const PurgeVolumeAllocation &allocation, const PrintObject *object, int copy,
+                                    size_t transition_extruder)
 {
     auto stored = allocation;
     if (has_wipe_tower() && wipe_tower_type() == WipeTowerType::Type2) {
@@ -517,7 +602,7 @@ void Print::record_inner_wall_purge(double z, unsigned int old_filament, unsigne
         stored.remaining += minimum;
     }
     std::scoped_lock lock(m_inner_wall_purge_mutex);
-    m_inner_wall_purge_transitions[{object, copy, z, old_filament, new_filament}] = stored;
+    m_inner_wall_purge_transitions[{object, copy, z, old_filament, new_filament, transition_extruder}] = stored;
 }
 
 void Print::plan_towerless_inner_wall_purge(LayerTools &layer, unsigned int &current, const PrintObject *object, int copy)
@@ -525,15 +610,38 @@ void Print::plan_towerless_inner_wall_purge(LayerTools &layer, unsigned int &cur
     {
         std::scoped_lock lock(m_inner_wall_purge_mutex);
         for (auto it = m_inner_wall_purge_transitions.begin(); it != m_inner_wall_purge_transitions.end();) {
-            const auto &[o, c, z, old_id, new_id] = it->first;
+            const auto &[o, c, z, old_id, new_id, ext] = it->first;
             if (o == object && c == copy && std::abs(z - layer.print_z) < EPSILON) it = m_inner_wall_purge_transitions.erase(it);
             else ++it;
         }
     }
     auto &wiping = layer.wiping_extrusions();
     wiping.reset_overrides(&layer);
+    // Seed per-nozzle residents on first use: the globally active filament is the
+    // resident of its own nozzle (single-nozzle prints and the sequential
+    // object-change path rely on this); every other nozzle starts empty, so a
+    // first use into it is loading, not contamination.
+    if (!m_inner_wall_purge_residents_seeded) {
+        m_inner_wall_purge_residents_seeded = true;
+        if (current != unsigned(-1)) {
+            const int nozzle   = purge_nozzle_for_filament(*this, nullptr, -1, current);
+            const int extruder = purge_extruder_for_filament(*this, nullptr, -1, current);
+            if (nozzle >= 0) m_inner_wall_purge_residents.set_nozzle_status(nozzle, int(current), extruder);
+        }
+    }
     for (unsigned int next : layer.extruders) {
-        if (next != current) wiping.mark_wiping_extrusions(*this, current, next, purge_volume_for_transition(current, next), object, copy);
+        const int nozzle   = purge_nozzle_for_filament(*this, nullptr, -1, next);
+        const int extruder = purge_extruder_for_filament(*this, nullptr, -1, next);
+        if (nozzle >= 0 && extruder >= 0) {
+            const int resident = m_inner_wall_purge_residents.get_filament_in_nozzle(nozzle);
+            if (resident >= 0 && unsigned(resident) != next)
+                wiping.mark_wiping_extrusions(*this, unsigned(resident), next,
+                    purge_volume_for_transition(unsigned(resident), next, size_t(extruder)), object, copy, size_t(extruder));
+            m_inner_wall_purge_residents.set_nozzle_status(nozzle, int(next), extruder);
+        } else if (next != current) {
+            // Unresolved mapping: fall back to the scalar active filament.
+            wiping.mark_wiping_extrusions(*this, current, next, purge_volume_for_transition(current, next), object, copy);
+        }
         current = next;
     }
     wiping.ensure_perimeters_infills_order(*this, object, copy);

@@ -7,6 +7,8 @@
 
 #include <functional>
 #include <map>
+#include <set>
+#include <tuple>
 #include <utility>
 
 #include <boost/container/small_vector.hpp>
@@ -48,22 +50,44 @@ public:
 
     // This is called from GCode::process_layer - see implementation for further comments:
     const ExtruderPerCopy* get_extruder_overrides(const ExtrusionEntity* entity, const PrintObject* object, int correct_extruder_id, size_t num_of_copies);
-    int get_support_extruder_overrides(const PrintObject* object);
-    int get_support_interface_extruder_overrides(const PrintObject* object);
+    // Support overrides are keyed by (object, copy): each copy's transition
+    // allocates its own support purge instead of sharing or double-spending one
+    // object-wide entry.
+    int get_support_extruder_overrides(const PrintObject* object, size_t copy) const;
+    int get_support_interface_extruder_overrides(const PrintObject* object, size_t copy) const;
 
     // This function goes through all infill entities, decides which ones will be used for wiping and
     // marks them by the extruder id. Returns volume that remains to be wiped on the wipe tower:
+    // transition_extruder is the destination physical extruder/nozzle of this transition; it keys
+    // the statistics record so repeated same-pair events on different nozzles are not merged.
     float mark_wiping_extrusions(const Print& print, unsigned int old_extruder, unsigned int new_extruder, float volume_to_wipe,
-                                const PrintObject *only_object = nullptr, int only_copy = -1);
+                                const PrintObject *only_object = nullptr, int only_copy = -1, size_t transition_extruder = 0);
     float mark_dedicated_purge(const Print &print, unsigned int old_extruder, unsigned int new_extruder, float volume,
                                 const PrintObject *object = nullptr) {
         return mark_wiping_extrusions_impl(print, old_extruder, new_extruder, volume, object, object ? 0 : -1, true);
     }
     PurgeVolumeAllocation last_purge_allocation;
     void reset_overrides(const LayerTools *layer_tools) {
-        entity_map.clear(); support_map.clear(); support_intf_map.clear();
+        entity_map.clear(); support_map.clear(); support_intf_map.clear(); mixed_purge_map.clear();
         something_overridden = false; something_overridable = true;
         m_layer_tools = layer_tools;
+    }
+
+    // Mixed-color sublayer allocation: (entity, object, copy) -> components whose
+    // sub-layer band of this entity is purge-allocated. A mixed-slot entity keeps
+    // its per-component band emission, so it can serve one transition per
+    // component (one band each) — unlike an ordinary entity, which prints once.
+    void mark_mixed_purge(const ExtrusionEntity *entity, const PrintObject *object, size_t copy, unsigned int component) {
+        something_overridden = true;
+        mixed_purge_map[{entity, object, copy}].insert(component);
+    }
+    bool is_mixed_purge_allocated(const ExtrusionEntity *entity, const PrintObject *object, size_t copy, unsigned int component) const {
+        auto it = mixed_purge_map.find({entity, object, copy});
+        return it != mixed_purge_map.end() && it->second.count(component) != 0;
+    }
+    const std::set<unsigned int> *mixed_purge_components(const ExtrusionEntity *entity, const PrintObject *object, size_t copy) const {
+        auto it = mixed_purge_map.find({entity, object, copy});
+        return it == mixed_purge_map.end() ? nullptr : &it->second;
     }
 
     void ensure_perimeters_infills_order(const Print& print, const PrintObject *only_object = nullptr, int only_copy = -1);
@@ -83,12 +107,12 @@ public:
         return out;
     }
 
-    bool is_support_overridden(const PrintObject* object) const {
-        return support_map.find(object) != support_map.end();
+    bool is_support_overridden(const PrintObject* object, size_t copy) const {
+        return support_map.find({object, copy}) != support_map.end();
     }
 
-    bool is_support_interface_overridden(const PrintObject* object) const {
-        return support_intf_map.find(object) != support_intf_map.end();
+    bool is_support_interface_overridden(const PrintObject* object, size_t copy) const {
+        return support_intf_map.find({object, copy}) != support_intf_map.end();
     }
 
     void set_layer_tools_ptr(const LayerTools* lt) { m_layer_tools = lt; }
@@ -114,9 +138,11 @@ private:
     }
 
     std::map<std::tuple<const ExtrusionEntity*, const PrintObject *>, ExtruderPerCopy> entity_map;  // to keep track of who prints what
-    // BBS
-    std::map<const PrintObject*, int> support_map;
-    std::map<const PrintObject*, int> support_intf_map;
+    // Mixed-slot band allocations, keyed (entity, object, copy) -> components.
+    std::map<std::tuple<const ExtrusionEntity*, const PrintObject*, size_t>, std::set<unsigned int>> mixed_purge_map;
+    // BBS: support overrides are copy-isolated — (object, copy) -> extruder.
+    std::map<std::pair<const PrintObject*, size_t>, int> support_map;
+    std::map<std::pair<const PrintObject*, size_t>, int> support_intf_map;
     bool something_overridable = false;
     bool something_overridden = false;
     const LayerTools* m_layer_tools = nullptr;    // so we know which LayerTools object this belongs to

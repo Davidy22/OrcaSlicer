@@ -37,6 +37,109 @@
 
 namespace Slic3r {
 
+namespace {
+
+// The entity's own filament slot (0-based), without LayerTools::extruder()'s
+// mixed-slot resolution: a mixed-region entity's slot is what decides whether it
+// keeps per-component band emission (and thus only serves its own components).
+unsigned int wiping_own_slot(const LayerTools &lt, const LayerRegion &layerm, const ExtrusionEntityCollection &eec)
+{
+    const auto &rc = layerm.region().config();
+    unsigned int filament_1b = 1;
+    if (eec.has_infill()) {
+        if (eec.has_solid_infill()) {
+            const ExtrusionRole role = eec.role();
+            if (role == erTopSolidInfill || role == erIroning)
+                filament_1b = rc.top_surface_filament_id;
+            else if (role == erBottomSurface)
+                filament_1b = rc.bottom_surface_filament_id;
+            else
+                filament_1b = rc.internal_solid_filament_id;
+        } else {
+            filament_1b = rc.sparse_infill_filament_id;
+        }
+    } else {
+        switch (eec.role()) {
+        case erSupportMaterial:
+        case erSupportTransition:         filament_1b = layerm.layer()->object()->config().support_filament.value; break;
+        case erSupportMaterialInterface:  filament_1b = layerm.layer()->object()->config().support_interface_filament.value; break;
+        default:                          filament_1b = (eec.role() == erPerimeter) ? rc.inner_wall_filament_id.value
+                                                                                             : rc.outer_wall_filament_id.value; break;
+        }
+    }
+    (void)lt;
+    return filament_1b > 0 ? filament_1b - 1 : 0;
+}
+
+// Effective physical volume emitted when `eec` is printed with `new_extruder` on
+// the layer of `lt`: the nominal entity volume times the incoming filament flow
+// ratio, the region print flow ratio, and the role flow ratio (the latter only
+// when "other flow ratios" are enabled). For an entity of a mixed-color slot, the
+// volume is additionally scaled by the component's sub-layer band fraction, so a
+// nominal loop is never credited for more than the portion actually emitted for
+// that component. This is the single accounting model shared by dedicated purge
+// objects, added walls, infill, support body and support interface, so the sum of
+// credits conserves the requested purge volume.
+double wiping_effective_volume(const Print &print, const LayerTools &lt, const LayerRegion &layerm,
+                               const ExtrusionEntityCollection &eec, unsigned int new_extruder)
+{
+    const auto &region_config = layerm.region().config();
+    const auto &object_config = layerm.layer()->object()->config();
+    const int fi = const_cast<Print &>(print).get_filament_config_indx(int(new_extruder), int(layerm.layer()->id()));
+    const double filament_flow = print.config().filament_flow_ratio.get_at(fi);
+    double role_flow = 1.;
+    if (object_config.set_other_flow_ratios) {
+        switch (eec.role()) {
+        case erInternalInfill:            role_flow = region_config.sparse_infill_flow_ratio.value; break;
+        case erSolidInfill:               role_flow = region_config.internal_solid_infill_flow_ratio.value; break;
+        case erTopSolidInfill:            role_flow = region_config.top_solid_infill_flow_ratio.value; break;
+        case erBottomSurface:             role_flow = region_config.bottom_solid_infill_flow_ratio.value; break;
+        case erExternalPerimeter:
+        case erOverhangPerimeter:         role_flow = region_config.outer_wall_flow_ratio.value; break;
+        case erPerimeter:                 role_flow = region_config.inner_wall_flow_ratio.value; break;
+        case erSupportMaterial:
+        case erSupportTransition:         role_flow = region_config.support_flow_ratio.value; break;
+        case erSupportMaterialInterface:  role_flow = region_config.support_interface_flow_ratio.value; break;
+        default: break;
+        }
+    }
+    double volume = eec.total_volume() * filament_flow * region_config.print_flow_ratio * role_flow;
+    // Mixed-color slot: only the target component's sub-layer band is emitted for it.
+    const unsigned int own = wiping_own_slot(lt, layerm, eec);
+    if (lt.is_mixed_slot(own)) {
+        if (const LayerTools::MixedSubLayerGroup *grp = lt.mixed_group_by_slot(own)) {
+            for (size_t k = 0; k < grp->components_0based.size(); ++k)
+                if (grp->components_0based[k] == new_extruder) {
+                    const double lh = grp->layer_height > 0. ? grp->layer_height : 1.;
+                    volume *= grp->sub_heights[k] / lh;
+                    break;
+                }
+        }
+    }
+    return volume;
+}
+
+// Can `eec` serve as a purge target for a transition into `new_extruder`?
+// Ordinary entities can: the override redirects them to the incoming extruder at
+// full height. Mixed-slot entities only for their own slot's components: they keep
+// their per-component band emission and the override merely reorders them, so a
+// transition into an unrelated filament must not be credited against them.
+bool wiping_can_target(const LayerTools &lt, const LayerRegion &layerm, const ExtrusionEntityCollection &eec, unsigned int new_extruder)
+{
+    const unsigned int own = wiping_own_slot(lt, layerm, eec);
+    if (!lt.is_mixed_slot(own))
+        return true;
+    const LayerTools::MixedSubLayerGroup *grp = lt.mixed_group_by_slot(own);
+    if (grp == nullptr)
+        return false;
+    for (unsigned int comp : grp->components_0based)
+        if (comp == new_extruder)
+            return true;
+    return false;
+}
+
+} // namespace
+
     //! macro used to mark string used at localization,
     //! return same string
 
@@ -3257,17 +3360,17 @@ void WipingExtrusions::set_extruder_override(const ExtrusionEntity* entity, cons
     copies_vector[copy_id] = extruder;
 }
 
-// BBS
+// BBS: copy-isolated — each copy allocates its own support-body purge target.
 void WipingExtrusions::set_support_extruder_override(const PrintObject* object, size_t copy_id, int extruder, size_t num_of_copies)
 {
     something_overridden = true;
-    support_map.emplace(object, extruder);
+    support_map[{object, copy_id}] = extruder;
 }
 
 void WipingExtrusions::set_support_interface_extruder_override(const PrintObject* object, size_t copy_id, int extruder, size_t num_of_copies)
 {
     something_overridden = true;
-    support_intf_map.emplace(object, extruder);
+    support_intf_map[{object, copy_id}] = extruder;
 }
 
 // Finds first non-soluble extruder on the layer
@@ -3348,17 +3451,21 @@ float WipingExtrusions::mark_inner_walls(const Print& print, unsigned int old_ex
         const Layer *layer = object->get_layer_at_printz(m_layer_tools->print_z, EPSILON);
         if (!layer) continue;
         std::vector<const ExtrusionEntityCollection *> candidates;
-        std::map<const ExtrusionEntityCollection *, double> flow_factors;
-        const int fi = const_cast<Print &>(print).get_filament_config_indx(int(new_extruder), int(layer->id()));
-        const double filament_flow = print.config().filament_flow_ratio.get_at(fi);
+        std::map<const ExtrusionEntityCollection *, double> capacities;
+        std::map<const ExtrusionEntityCollection *, bool> mixed_slot;
         for (const LayerRegion *region : layer->regions())
             for (const auto *entity : region->perimeters.entities) {
                 const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity);
                 if (collection && is_purge_inner_wall(*collection) && is_overriddable(*collection, print.config(), *object, region->region())) {
+                    // A mixed-slot loop only serves transitions into its own
+                    // components (it keeps its band emission); skip it otherwise.
+                    if (!wiping_can_target(*m_layer_tools, *region, *collection, new_extruder)) continue;
                     candidates.push_back(collection);
-                    const auto &config = region->region().config();
-                    flow_factors[collection] = filament_flow * config.print_flow_ratio *
-                        (object->config().set_other_flow_ratios ? config.inner_wall_flow_ratio.value : 1.);
+                    // Effective emitted volume: incoming flow, region print flow,
+                    // role flow, and — for mixed-color slots — only the target
+                    // component's sub-layer band of this loop.
+                    capacities[collection] = wiping_effective_volume(print, *m_layer_tools, *region, *collection, new_extruder);
+                    mixed_slot[collection] = m_layer_tools->is_mixed_slot(wiping_own_slot(*m_layer_tools, *region, *collection));
                 }
             }
         std::stable_sort(candidates.begin(), candidates.end(), [](const auto *a, const auto *b) {
@@ -3367,10 +3474,21 @@ float WipingExtrusions::mark_inner_walls(const Print& print, unsigned int old_ex
         for (size_t copy = 0; copy < object->instances().size(); ++copy) {
             if (only_copy >= 0 && copy != size_t(only_copy)) continue;
             for (const auto *candidate : candidates) {
-                if (is_entity_overridden(candidate, object, copy)) continue;
-                const float capacity = float(candidate->total_volume() * flow_factors[candidate]);
+                const float capacity = float(capacities[candidate]);
                 if (!std::isfinite(capacity) || capacity <= 0.f) continue;
-                set_extruder_override(candidate, object, copy, new_extruder, object->instances().size());
+                if (mixed_slot[candidate]) {
+                    // One band per component: the same loop can serve one
+                    // transition per component, but never one component twice.
+                    // Keyed by the loop: the G-code region view flattens the
+                    // single-loop purge collections to their child loop.
+                    const ExtrusionEntity *loop = candidate->entities.front();
+                    if (is_mixed_purge_allocated(loop, object, copy, new_extruder)) continue;
+                    mark_mixed_purge(loop, object, copy, new_extruder);
+                } else {
+                    // An ordinary loop prints once: it cannot serve two transitions.
+                    if (is_entity_overridden(candidate, object, copy)) continue;
+                    set_extruder_override(candidate, object, copy, new_extruder, object->instances().size());
+                }
                 volume -= capacity;
                 if (volume <= 0.f) return 0.f;
             }
@@ -3380,7 +3498,7 @@ float WipingExtrusions::mark_inner_walls(const Print& print, unsigned int old_ex
 }
 
 float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int old_extruder, unsigned int new_extruder,
-                                             float volume, const PrintObject *only_object, int only_copy)
+                                             float volume, const PrintObject *only_object, int only_copy, size_t transition_extruder)
 {
     volume = std::max(0.f, volume);
     last_purge_allocation = {};
@@ -3399,7 +3517,7 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
     last_purge_allocation.remaining = remaining;
     if (print.flush_into_inner_walls())
         const_cast<Print &>(print).record_inner_wall_purge(m_layer_tools->print_z, old_extruder, new_extruder,
-                                                         last_purge_allocation, only_object, only_copy);
+                                                         last_purge_allocation, only_object, only_copy, transition_extruder);
     return remaining;
 }
 
@@ -3470,6 +3588,10 @@ float WipingExtrusions::mark_wiping_extrusions_impl(const Print& print, unsigned
 
                         if (!is_overriddable(*fill, print.config(), *object, region))
                             continue;
+                        // Mixed-slot infill keeps its band emission; it can only
+                        // absorb transitions into its own components.
+                        if (!wiping_can_target(lt, *layerm, *fill, new_extruder))
+                            continue;
 
                         if (wipe_into_infill_only && ! is_infill_first)
                             // In this case we must check that the original extruder is used on this layer before the one we are overridding
@@ -3480,7 +3602,10 @@ float WipingExtrusions::mark_wiping_extrusions_impl(const Print& print, unsigned
                         if ((!is_entity_overridden(fill, object, copy) && fill->total_volume() > min_infill_volume))
                         {     // this infill will be used to wipe this extruder
                             set_extruder_override(fill, object, copy, new_extruder, num_of_copies);
-                            if ((volume_to_wipe -= float(fill->total_volume())) <= 0.f)
+                            // Credit the effective emitted volume (flow factors and,
+                            // for mixed slots, the component's band fraction), not the
+                            // raw nominal volume, so credits conserve the demand.
+                            if ((volume_to_wipe -= float(wiping_effective_volume(print, lt, *layerm, *fill, new_extruder))) <= 0.f)
                             	// More material was purged already than asked for.
 	                            return 0.f;
                         }
@@ -3495,9 +3620,10 @@ float WipingExtrusions::mark_wiping_extrusions_impl(const Print& print, unsigned
                         // allocator, even on a dedicated purge object.
                         if (print.flush_into_inner_walls() && is_purge_inner_wall(*ee)) continue;
                         auto* fill = dynamic_cast<const ExtrusionEntityCollection*>(ee);
+                        if (!wiping_can_target(lt, *layerm, *fill, new_extruder)) continue;
                         if (is_overriddable(*fill, print.config(), *object, region) && !is_entity_overridden(fill, object, copy) && fill->total_volume() > min_infill_volume) {
                             set_extruder_override(fill, object, copy, new_extruder, num_of_copies);
-                            if ((volume_to_wipe -= float(fill->total_volume())) <= 0.f)
+                            if ((volume_to_wipe -= float(wiping_effective_volume(print, lt, *layerm, *fill, new_extruder))) <= 0.f)
                             	// More material was purged already than asked for.
 	                            return 0.f;
                         }
@@ -3509,6 +3635,11 @@ float WipingExtrusions::mark_wiping_extrusions_impl(const Print& print, unsigned
             if (object->config().flush_into_support) {
                 auto& object_config = object->config();
                 const SupportLayer* this_support_layer = object->get_support_layer_at_printz(lt.print_z, EPSILON);
+                // Flow factors for the support credit come from the object's region
+                // config; support-only layers (no object region at this Z) fall
+                // back to the nominal volume.
+                const LayerRegion *credit_region = nullptr;
+                for (const LayerRegion *r : this_layer->regions()) { credit_region = r; break; }
 
                 do {
                     if (this_support_layer == nullptr)
@@ -3520,22 +3651,32 @@ float WipingExtrusions::mark_wiping_extrusions_impl(const Print& print, unsigned
                         break;
 
                     auto &entities = this_support_layer->support_fills.entities;
-                    if (support_overriddable && !is_support_overridden(object) && !(object_config.support_interface_not_for_body.value && !support_intf_overriddable &&(new_extruder==object_config.support_interface_filament-1||old_extruder==object_config.support_interface_filament-1))) {
+                    if (support_overriddable && !is_support_overridden(object, copy) && !(object_config.support_interface_not_for_body.value && !support_intf_overriddable &&(new_extruder==object_config.support_interface_filament-1||old_extruder==object_config.support_interface_filament-1))) {
                         set_support_extruder_override(object, copy, new_extruder, num_of_copies);
                         for (const ExtrusionEntity* ee : entities) {
-                            if (ee->role() == erSupportMaterial || ee->role() == erSupportTransition)
-                                volume_to_wipe -= ee->total_volume();
+                            if (ee->role() == erSupportMaterial || ee->role() == erSupportTransition) {
+                                const auto *eec = dynamic_cast<const ExtrusionEntityCollection *>(ee);
+                                if (eec != nullptr && credit_region != nullptr)
+                                    volume_to_wipe -= float(wiping_effective_volume(print, lt, *credit_region, *eec, new_extruder));
+                                else
+                                    volume_to_wipe -= ee->total_volume();
+                            }
 
                             if (volume_to_wipe <= 0.f)
                                 return 0.f;
                         }
                     }
 
-                    if (support_intf_overriddable && !is_support_interface_overridden(object)) {
+                    if (support_intf_overriddable && !is_support_interface_overridden(object, copy)) {
                         set_support_interface_extruder_override(object, copy, new_extruder, num_of_copies);
                         for (const ExtrusionEntity* ee : entities) {
-                            if (ee->role() == erSupportMaterialInterface)
-                                volume_to_wipe -= ee->total_volume();
+                            if (ee->role() == erSupportMaterialInterface) {
+                                const auto *eec = dynamic_cast<const ExtrusionEntityCollection *>(ee);
+                                if (eec != nullptr && credit_region != nullptr)
+                                    volume_to_wipe -= float(wiping_effective_volume(print, lt, *credit_region, *eec, new_extruder));
+                                else
+                                    volume_to_wipe -= ee->total_volume();
+                            }
 
                             if (volume_to_wipe <= 0.f)
                                 return 0.f;
@@ -3637,18 +3778,18 @@ const WipingExtrusions::ExtruderPerCopy* WipingExtrusions::get_extruder_override
 }
 
 // BBS
-int WipingExtrusions::get_support_extruder_overrides(const PrintObject* object)
+int WipingExtrusions::get_support_extruder_overrides(const PrintObject* object, size_t copy) const
 {
-    auto iter = support_map.find(object);
+    auto iter = support_map.find({object, copy});
     if (iter != support_map.end())
         return iter->second;
 
     return -1;
 }
 
-int WipingExtrusions::get_support_interface_extruder_overrides(const PrintObject* object)
+int WipingExtrusions::get_support_interface_extruder_overrides(const PrintObject* object, size_t copy) const
 {
-    auto iter = support_intf_map.find(object);
+    auto iter = support_intf_map.find({object, copy});
     if (iter != support_intf_map.end())
         return iter->second;
 
