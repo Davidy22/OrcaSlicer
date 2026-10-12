@@ -20,13 +20,35 @@ B=$REPO/deps/build
 echo "== git =="
 git fetch origin "$BRANCH" || { echo "fetch failed"; exit 1; }
 if git rev-parse --verify -q "origin/$BRANCH" >/dev/null; then
-    if git diff --quiet "origin/$BRANCH" 2>/dev/null; then
+    if [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$BRANCH")" ] && [ -z "$(git status --porcelain)" ]; then
+        echo "local branch already at origin/$BRANCH, tree clean"
+    else
+        # Safety check before `git reset --hard`: every difference vs origin must
+        # be a file that is untracked in the worktree but byte-identical to the
+        # origin blob (this is exactly the state a sandbox restore leaves behind:
+        # local index rolled back, worktree intact). Anything else = uncommitted
+        # work we must not discard.
+        unsafe=0
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+                unsafe=1; echo "  tracked file modified vs origin: $f"
+            elif ! git show "origin/$BRANCH:$f" 2>/dev/null | diff -q - "$f" >/dev/null 2>&1; then
+                unsafe=1; echo "  untracked file differs from origin blob: $f"
+            fi
+        done < <(git diff "origin/$BRANCH" --name-only)
+        if [ "$unsafe" -ne 0 ]; then
+            echo "WARNING: working tree has changes not on origin/$BRANCH — NOT resetting."
+            echo "Commit and push your changes first, then re-run recover.sh."
+            exit 1
+        fi
         git reset --hard "origin/$BRANCH" >/dev/null
         echo "local branch fast-forwarded to origin/$BRANCH ($(git rev-parse --short HEAD))"
-    else
-        echo "WARNING: working tree differs from origin/$BRANCH — NOT resetting."
-        echo "Commit and push your changes first, then re-run recover.sh."
-        exit 1
+        new_untracked=$(git ls-files --others --exclude-standard)
+        if [ -n "$new_untracked" ]; then
+            echo "NOTE: untracked files not on the branch (left in place):"
+            echo "$new_untracked" | sed 's/^/  /'
+        fi
     fi
 fi
 
