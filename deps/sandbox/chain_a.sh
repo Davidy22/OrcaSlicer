@@ -92,6 +92,15 @@ FcBool FcConfigDestroy (FcConfig *config);
 #endif
 #endif
 EOS
+    # FFmpeg stub .so files: the main CMake unconditionally file(COPY)s these
+    # next to every binary (orcaslicer_copy_sos); with SLIC3R_GUI=OFF nothing
+    # links them, they only need to exist.
+    for n in libavcodec.so libavcodec.so.61 libavcodec.so.61.3.100 \
+             libavutil.so libavutil.so.59 libavutil.so.59.8.100 \
+             libswscale.so libswscale.so.8 libswscale.so.8.1.100 \
+             libswresample.so libswresample.so.5 libswresample.so.5.1.100; do
+        [ -e "$PREFIX/lib/$n" ] || gcc -shared -x c -o "$PREFIX/lib/$n" /dev/null
+    done
     # real libudev.h (for deps_src/hidapi compile) from the systemd repo via gh api
     gh api "repos/systemd/systemd/contents/src/libudev/libudev.h?ref=v255.5" --jq .content 2>/dev/null \
         | tr -d '\n' | base64 -d > "$PREFIX/include/libudev.h" 2>/dev/null
