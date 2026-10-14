@@ -187,6 +187,15 @@ if ! is_done boost; then
         -DBOOST_INCLUDE_LIBRARIES="system;filesystem;thread;log;locale;regex;chrono;atomic;date_time;iostreams;program_options;nowide;uuid" \
         -DBOOST_EXCLUDE_LIBRARIES="contract;fiber;numpy;stacktrace;wave;test" \
         -DBOOST_LOCALE_ENABLE_ICU=OFF -DBUILD_TESTING=OFF || exit 1
+    # Install the FULL Boost header tree (b2-style): BOOST_INCLUDE_LIBRARIES only
+    # installs headers of the built libraries and their dependency closure, but
+    # libslic3r/deps_src include other header-only parts (boost/format.hpp,
+    # boost/uuid/..., ...).
+    for d in "$SRC/boost"/libs/*/include/boost; do
+        [ -d "$d" ] || continue
+        cp -rn "$d"/* "$PREFIX/include/boost/" 2>/dev/null || true
+    done
+    [ -d "$SRC/boost/boost" ] && cp -rn "$SRC/boost"/boost/* "$PREFIX/include/boost/" 2>/dev/null
 fi
 
 # oneTBB 2021.5.0 (static; tbbbind needs hwloc which is absent -> patched out)
