@@ -9,13 +9,40 @@ if ! is_done stubs; then
     log "=== stubs ==="
     mkdir -p /home/user/fakebin "$PREFIX/include/GL" "$PREFIX/lib/cmake/glfw3" \
              "$PREFIX/include/dbus-1.0/dbus" "$PREFIX/include/dbus" "$PREFIX/lib"
-    # fake pkg-config (the real one is absent; the main build only probes with it)
+    # pkg-config shim (the real one is absent). Answers from the sandbox
+    # dependency prefix so configure-time probes (e.g. CPython's zlib check)
+    # get real -I/-L/-l flags instead of empty ones.
     cat > /home/user/fakebin/pkg-config << 'EOS'
 #!/usr/bin/env bash
-case "$1" in
+PREFIX=/home/user/OrcaSlicer/deps/build/OrcaSlicer_dep/usr/local
+libname() {
+    case "$1" in
+        zlib) echo z ;;
+        libpng) echo png ;;
+        libjpeg) echo jpeg ;;
+        freetype2) echo freetype ;;
+        openssl) echo "ssl crypto" ;;
+        libcurl) echo curl ;;
+        *) echo "$1" ;;
+    esac
+}
+mode="${1:-}"; shift 2>/dev/null || true
+lonly=""
+for p in "$@"; do
+    case "$p" in --*) continue ;; esac
+    for l in $(libname "$p"); do
+        if [ -e "$PREFIX/lib/lib$l.so" ] || [ -e "$PREFIX/lib/lib$l.a" ]; then
+            lonly="$lonly -l$l"
+        fi
+    done
+done
+case "$mode" in
   --version) echo "0.29.2" ;;
   --exists) exit 0 ;;
-  --cflags|--libs) echo "" ;;
+  --libs) echo "-L$PREFIX/lib $lonly" ;;
+  --libs-only-L) echo "-L$PREFIX/lib" ;;
+  --libs-only-l) echo "$lonly" ;;
+  --cflags|--cflags-only-I) echo "-I$PREFIX/include" ;;
   *) echo "" ;;
 esac
 EOS
@@ -394,6 +421,7 @@ if ! is_done occt; then
         -DBUILD_DOC_Overview=OFF \
         -DBUILD_MODULE_Draw=OFF -DBUILD_MODULE_Visualization=OFF \
         -DOPENGL_INCLUDE_DIR="$PREFIX/include" -DOPENGL_gl_LIBRARY="$PREFIX/lib/libGL.a" \
+        -DCMAKE_C_FLAGS="-I$PREFIX/include" -DCMAKE_CXX_FLAGS="-I$PREFIX/include" \
         || exit 1
     ar rcs "$PREFIX/lib/libTKV3d.a"   # Visualization off; nothing references it
     for lib in TKernel TKMath TKXDESTEP TKSTEP TKSTEPBase TKXSBase TKService TKBRep TKTopAlgo TKCAF TKCDF; do

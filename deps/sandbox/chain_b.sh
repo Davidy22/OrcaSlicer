@@ -11,7 +11,12 @@ if ! is_done python; then
     dl python.tar.gz "https://codeload.github.com/python/cpython/tar.gz/refs/tags/v3.12.13" || exit 1
     S=$(ex python.tar.gz "$SRC/python") || exit 1
     wait_file "$LOG/expat.done" || exit 1
-    ( cd "$S" && ./configure --prefix="$PREFIX/libpython" --enable-shared \
+    # ZLIB_CFLAGS/ZLIB_LIBS are preset because configure finds zlib through
+    # pkg-config, and the sandbox pkg-config shim cannot know the -lz mapping;
+    # without this the zlib/binascii modules link with empty flags and end up
+    # with undefined crc32/inflate symbols.
+    ( cd "$S" && ZLIB_CFLAGS="-I$PREFIX/include" ZLIB_LIBS="-L$PREFIX/lib -lz" \
+        ./configure --prefix="$PREFIX/libpython" --enable-shared \
         --with-ensurepip=no --disable-test-modules --with-system-expat \
         CPPFLAGS="-I$PREFIX/include" LDFLAGS="-L$PREFIX/lib -Wl,-rpath,$PREFIX/lib" ) >>"$LOG/python.log" 2>&1 \
         || { log "CONFIGURE FAILED python"; exit 1; }
