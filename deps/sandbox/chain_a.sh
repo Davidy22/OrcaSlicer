@@ -155,7 +155,7 @@ fi
 if ! is_done tbb; then
     dl tbb.tar.gz "https://codeload.github.com/oneapi-src/oneTBB/tar.gz/refs/tags/v2021.5.0" || exit 1
     S=$(ex tbb.tar.gz "$SRC/tbb") || exit 1
-    sed -i 's/^add_subdirectory(tbbbind)/# add_subdirectory(tbbbind)/' "$S/CMakeLists.txt" 2>/dev/null
+    sed -i 's|add_subdirectory(src/tbbbind)|# add_subdirectory(src/tbbbind)|' "$S/CMakeLists.txt" 2>/dev/null
     cmake_build tbb "$S" "$BLD/tbb" -DTBB_TEST=OFF -DTBB_STRICT=OFF || exit 1
 fi
 

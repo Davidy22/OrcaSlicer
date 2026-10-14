@@ -60,6 +60,7 @@ cmake_build() { # cmake_build <name> <srcdir> <builddir> [extra cmake args...]
     "$CMAKE" -S "$src" -B "$bld" -GNinja \
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
         -DCMAKE_PREFIX_PATH="$PREFIX" -DBUILD_SHARED_LIBS=OFF \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DCMAKE_C_FLAGS_RELEASE="-O1 -DNDEBUG" -DCMAKE_CXX_FLAGS_RELEASE="-O1 -DNDEBUG" \
         "$@" >>"$LOG/$name.log" 2>&1 || { log "CONFIGURE FAILED: $name"; return 1; }
     "$CMAKE" --build "$bld" -j"$JOBS" >>"$LOG/$name.log" 2>&1 || { log "BUILD FAILED: $name"; return 1; }
