@@ -7,6 +7,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 PREFIX=$ROOT/OrcaSlicer_dep/usr/local
 REPO=$ROOT/../..                    # /home/user/OrcaSlicer (repo root)
 BUILD=$REPO/build                   # /home/user/OrcaSlicer/build (gitignored)
+# The test binaries are executed at build time (Catch2 test discovery) and at
+# test time; make their shared libs (libpython, shared deps) resolvable.
+export LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/libpython/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 for dep in zlib openssl curl libpng jpeg freetype expat boost tbb eigen m4 gmp mpfr cgal opencv assimp draco libnoise nlopt cereal openexr c-blosc openvdb occt stubs; do
     [ -f "$LOG/$dep.done" ] || { log "missing dependency: $dep (run chain_a.sh)"; exit 1; }

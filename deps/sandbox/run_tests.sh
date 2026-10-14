@@ -5,7 +5,12 @@ set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUILD=$REPO/build
 LOG=$REPO/deps/build/log
+PREFIX=$REPO/deps/build/OrcaSlicer_dep/usr/local
 export PATH="$REPO/deps/build/venv3/bin:$PATH"   # ctest lives in the venv
+# The test binaries link libpython (in <prefix>/libpython/lib) and possibly
+# shared dep libs (in <prefix>/lib); make them resolvable when ctest executes
+# them.
+export LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/libpython/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 mkdir -p "$LOG"
 
 cd "$BUILD/tests" || { echo "no build dir — run configure_main.sh first"; exit 1; }
