@@ -5,7 +5,8 @@ set -u
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 PREFIX=$ROOT/OrcaSlicer_dep/usr/local
-BUILD=$ROOT/../build   # /home/user/OrcaSlicer/build (gitignored)
+REPO=$ROOT/../..                    # /home/user/OrcaSlicer (repo root)
+BUILD=$REPO/build                   # /home/user/OrcaSlicer/build (gitignored)
 
 for dep in zlib openssl curl libpng jpeg freetype expat boost tbb eigen m4 gmp mpfr cgal opencv assimp draco libnoise nlopt cereal openexr c-blosc openvdb occt stubs; do
     [ -f "$LOG/$dep.done" ] || { log "missing dependency: $dep (run chain_a.sh)"; exit 1; }
