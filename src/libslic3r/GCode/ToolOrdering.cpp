@@ -98,8 +98,8 @@ double wiping_effective_volume(const Print &print, const LayerTools &lt, const L
         case erOverhangPerimeter:         role_flow = region_config.outer_wall_flow_ratio.value; break;
         case erPerimeter:                 role_flow = region_config.inner_wall_flow_ratio.value; break;
         case erSupportMaterial:
-        case erSupportTransition:         role_flow = region_config.support_flow_ratio.value; break;
-        case erSupportMaterialInterface:  role_flow = region_config.support_interface_flow_ratio.value; break;
+        case erSupportTransition:         role_flow = object_config.support_flow_ratio.value; break;
+        case erSupportMaterialInterface:  role_flow = object_config.support_interface_flow_ratio.value; break;
         default: break;
         }
     }
