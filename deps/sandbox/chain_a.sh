@@ -317,12 +317,41 @@ if ! is_done openexr; then
         -DOPENEXR_BUILD_EXAMPLES=OFF -DOPENEXR_INSTALL_PKG_CONFIG=OFF || exit 1
 fi
 
-# c-blosc 1.17.0
+# c-blosc 1.17.0 (+ BloscConfig fallback: OpenVDB does find_package(Blosc 1.5.0
+# REQUIRED) in config mode, but c-blosc 1.17 installs no cmake package config —
+# and a requested version requires a *ConfigVersion.cmake as well)
 if ! is_done c-blosc; then
     dl c-blosc.tar.gz "https://codeload.github.com/Blosc/c-blosc/tar.gz/refs/tags/v1.17.0" || exit 1
     S=$(ex c-blosc.tar.gz "$SRC/c-blosc") || exit 1
     cmake_build c-blosc "$S" "$BLD/c-blosc" -DBUILD_TESTS=OFF -DBUILD_BENCHMARKS=OFF \
         -DBUILD_EXAMPLES=OFF -DBUILD_FUZZERS=OFF -DPREFER_EXTERNAL_ZLIB=ON || exit 1
+    if ! find "$PREFIX" -name "BloscConfig.cmake" -o -name "blosc-config.cmake" 2>/dev/null | grep -q .; then
+        mkdir -p "$PREFIX/lib/cmake/blosc"
+        cat > "$PREFIX/lib/cmake/blosc/BloscConfig.cmake" << 'EOC'
+if(NOT TARGET Blosc::blosc)
+    add_library(Blosc::blosc STATIC IMPORTED)
+    set_target_properties(Blosc::blosc PROPERTIES
+        IMPORTED_LOCATION "${CMAKE_CURRENT_LIST_DIR}/../../../lib/libblosc.a"
+        INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_LIST_DIR}/../../../include")
+endif()
+set(Blosc_FOUND TRUE)
+set(BLOSC_FOUND TRUE)
+set(Blosc_VERSION "1.17.0")
+set(BLOSC_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../include")
+set(BLOSC_LIBRARY "${CMAKE_CURRENT_LIST_DIR}/../../../lib/libblosc.a")
+EOC
+        cat > "$PREFIX/lib/cmake/blosc/BloscConfigVersion.cmake" << 'EOC'
+set(PACKAGE_VERSION "1.17.0")
+if(PACKAGE_FIND_VERSION VERSION_GREATER PACKAGE_VERSION)
+    set(PACKAGE_VERSION_COMPATIBLE FALSE)
+else()
+    set(PACKAGE_VERSION_COMPATIBLE TRUE)
+    if(PACKAGE_FIND_VERSION VERSION_EQUAL PACKAGE_VERSION)
+        set(PACKAGE_VERSION_EXACT TRUE)
+    endif()
+endif()
+EOC
+    fi
 fi
 
 # OpenVDB 8.2.x (fork with the version line the official deps pin; needed for

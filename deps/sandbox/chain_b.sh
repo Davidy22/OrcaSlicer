@@ -18,7 +18,7 @@ if ! is_done python; then
     # The sandbox has no bzip2/xz/sqlite3/libffi/readline/gdbm/tk/uuid/soundcard
     # headers and no package mirror; disable those extension modules (nothing in
     # the slicer build imports them — pybind11 needs only the core interpreter).
-    cat >> "$S/Modules/Setup.local" << 'EOS'
+    grep -q '^\*disabled\*' "$S/Modules/Setup.local" 2>/dev/null || cat >> "$S/Modules/Setup.local" << 'EOS'
 *disabled*
 _blake2
 _bz2
