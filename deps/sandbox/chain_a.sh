@@ -145,8 +145,10 @@ if ! is_done boost; then
         git clone --depth 1 --recursive --shallow-submodules --branch boost-1.84.0 \
             https://github.com/boostorg/boost.git "$SRC/boost" >>"$LOG/boost.log" 2>&1 || { log "CLONE FAILED boost"; exit 1; }
     fi
+    # uuid is header-only and needed by OpenVDB (boost/uuid/uuid.hpp); it is not
+    # pulled in by the dependency closure of the compiled libraries below.
     cmake_build boost "$SRC/boost" "$BLD/boost" \
-        -DBOOST_INCLUDE_LIBRARIES="system;filesystem;thread;log;locale;regex;chrono;atomic;date_time;iostreams;program_options;nowide" \
+        -DBOOST_INCLUDE_LIBRARIES="system;filesystem;thread;log;locale;regex;chrono;atomic;date_time;iostreams;program_options;nowide;uuid" \
         -DBOOST_EXCLUDE_LIBRARIES="contract;fiber;numpy;stacktrace;wave;test" \
         -DBOOST_LOCALE_ENABLE_ICU=OFF -DBUILD_TESTING=OFF || exit 1
 fi
