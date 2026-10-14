@@ -427,6 +427,13 @@ if ! is_done occt; then
     for lib in TKernel TKMath TKXDESTEP TKSTEP TKSTEPBase TKXSBase TKService TKBRep TKTopAlgo TKCAF TKCDF; do
         [ -f "$PREFIX/lib/lib$lib.a" ] || { log "OCCT MISSING lib$lib.a"; exit 1; }
     done
+    # OCCT 7.6 installs its cmake config to lib/cmake/opencascade (lowercase),
+    # but libslic3r hardcodes OpenCASCADE_DIR=<prefix>/lib/cmake/occt.
+    if [ ! -e "$PREFIX/lib/cmake/occt/OpenCASCADEConfig.cmake" ]; then
+        if [ -f "$PREFIX/lib/cmake/opencascade/OpenCASCADEConfig.cmake" ]; then
+            ln -sfn opencascade "$PREFIX/lib/cmake/occt"
+        fi
+    fi
     [ -f "$PREFIX/lib/cmake/occt/OpenCASCADEConfig.cmake" ] || { log "OCCT config missing"; exit 1; }
     done_marker occt
 fi
