@@ -14,8 +14,8 @@ NINJA=$ROOT/venv3/bin/ninja
 JOBS=${JOBS:-2}
 export PATH="$ROOT/venv3/bin:/home/user/fakebin:$PREFIX/bin:$PATH"
 export CC=gcc CXX=g++
-export CFLAGS="-O2 -fno-omit-frame-pointer"
-export CXXFLAGS="-O2 -fno-omit-frame-pointer"
+export CFLAGS="-O1 -fno-omit-frame-pointer"
+export CXXFLAGS="-O1 -fno-omit-frame-pointer"
 mkdir -p "$PREFIX" "$DL" "$SRC" "$BLD" "$LOG" /home/user/fakebin
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
@@ -60,7 +60,7 @@ cmake_build() { # cmake_build <name> <srcdir> <builddir> [extra cmake args...]
     "$CMAKE" -S "$src" -B "$bld" -GNinja \
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
         -DCMAKE_PREFIX_PATH="$PREFIX" -DBUILD_SHARED_LIBS=OFF \
-        -DCMAKE_C_FLAGS_RELEASE="-O2 -DNDEBUG" -DCMAKE_CXX_FLAGS_RELEASE="-O2 -DNDEBUG" \
+        -DCMAKE_C_FLAGS_RELEASE="-O1 -DNDEBUG" -DCMAKE_CXX_FLAGS_RELEASE="-O1 -DNDEBUG" \
         "$@" >>"$LOG/$name.log" 2>&1 || { log "CONFIGURE FAILED: $name"; return 1; }
     "$CMAKE" --build "$bld" -j"$JOBS" >>"$LOG/$name.log" 2>&1 || { log "BUILD FAILED: $name"; return 1; }
     "$CMAKE" --install "$bld" >>"$LOG/$name.log" 2>&1 || { log "INSTALL FAILED: $name"; return 1; }

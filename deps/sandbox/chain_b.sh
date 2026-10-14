@@ -35,6 +35,10 @@ spwd
 _uuid
 EOS
     ( cd "$S" && make -j"$JOBS" && make install ) >>"$LOG/python.log" 2>&1 || { log "BUILD FAILED python"; exit 1; }
+    # The installed interpreter's rpath is $PREFIX/lib (from LDFLAGS above), but
+    # libpython lands in $PREFIX/libpython/lib — copy it so FindPython3 can
+    # actually execute the interpreter during the main configure.
+    cp -a "$PREFIX/libpython/lib/"libpython3.12.so* "$PREFIX/lib/" 2>/dev/null || true
     done_marker python
 fi
 

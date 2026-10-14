@@ -13,7 +13,7 @@ done
 [ -f "$LOG/python.done" ] || { log "missing dependency: python (run chain_b.sh)"; exit 1; }
 
 log "=== configure main ==="
-"$CMAKE" -S "$ROOT/.." -B "$BUILD" -GNinja \
+"$CMAKE" -S "$REPO" -B "$BUILD" -GNinja \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_TESTS=ON -DSLIC3R_GUI=OFF -DSLIC3R_PCH=ON \
     -DCMAKE_PREFIX_PATH="$PREFIX" \

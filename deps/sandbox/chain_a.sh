@@ -36,8 +36,35 @@ EOS
     printf '#ifndef SANDBOX_DBUS_ARCH_DEPS_H\n#define SANDBOX_DBUS_ARCH_DEPS_H\n#define DBUS_ARCHITECTURE "x86_64"\n#endif\n' > "$PREFIX/include/dbus-1.0/dbus/dbus-arch-deps.h"
     cp "$PREFIX/include/dbus-1.0/dbus/dbus-arch-deps.h" "$PREFIX/include/dbus/dbus-arch-deps.h"
     ar rcs "$PREFIX/lib/libdbus-1.a"
-    # fontconfig stub (libslic3r links bare -lfontconfig)
-    ar rcs "$PREFIX/lib/libfontconfig.a"
+    # fontconfig: libslic3r links bare -lfontconfig and OCCT's TKService calls
+    # Fc* symbols — point -lfontconfig at the real system runtime library and
+    # provide the minimal public header OCCT 7.6's Font_FontMgr.cxx needs (the
+    # sandbox has the runtime lib but no dev symlink/headers).
+    ln -sf "$(ls /usr/lib/x86_64-linux-gnu/libfontconfig.so.1.* 2>/dev/null | head -1)" "$PREFIX/lib/libfontconfig.so"
+    mkdir -p "$PREFIX/include/fontconfig"
+    cat > "$PREFIX/include/fontconfig/fontconfig.h" << 'EOS'
+#ifndef SANDBOX_FONTCONFIG_FONTCONFIG_H
+#define SANDBOX_FONTCONFIG_FONTCONFIG_H
+/* Minimal public subset of <fontconfig/fontconfig.h>: exactly the API OCCT 7.6
+ * TKService (src/Font/Font_FontMgr.cxx) uses. ABI-compatible with the system
+ * libfontconfig.so.1 (opaque pointer types + simple scalars only). */
+typedef int FcBool;
+typedef unsigned char FcChar8;
+typedef struct _FcConfig FcConfig;
+typedef struct _FcStrList FcStrList;
+#ifdef __cplusplus
+extern "C" {
+#endif
+FcConfig *FcInitLoadConfig (void);
+FcStrList *FcConfigGetFontDirs (FcConfig *config);
+FcChar8 *FcStrListNext (FcStrList *list);
+void FcStrListDone (FcStrList *list);
+FcBool FcConfigDestroy (FcConfig *config);
+#ifdef __cplusplus
+}
+#endif
+#endif
+EOS
     # real libudev.h (for deps_src/hidapi compile) from the systemd repo via gh api
     gh api "repos/systemd/systemd/contents/src/libudev/libudev.h?ref=v255.5" --jq .content 2>/dev/null \
         | tr -d '\n' | base64 -d > "$PREFIX/include/libudev.h" 2>/dev/null
@@ -315,28 +342,33 @@ if ! is_done openvdb; then
         -DOPENVDB_BUILD_AX_UNITTESTS=OFF || exit 1
 fi
 
-# OCCT V7_6_0 headers + fake config (headers-only use; the STEP importer is
-# only called from the GUI which is built OFF)
+# OCCT V7_6_0 — REAL static build. libslic3r compiles Format/STEP.cpp into the
+# library and links the TK toolkits, so headers alone are not enough. Draw is
+# OFF (needs Tcl/Tk) and Visualization is OFF (the sandbox has no X11/GLX/EGL
+# headers); TKV3d is the only Visualization toolkit libslic3r names, nothing in
+# libslic3r references its symbols (GUI-only usage), so an empty archive
+# satisfies the linker. All other modules build so the full TK set exists.
 if ! is_done occt; then
     log "=== occt ==="
     dl occt.tar.gz "https://codeload.github.com/Open-Cascade-SAS/OCCT/tar.gz/refs/tags/V7_6_0" || exit 1
     S=$(ex occt.tar.gz "$SRC/occt") || exit 1
-    INC=""
-    for d in "$S"/src/*/; do INC="$INC -DOpenCASCADE_${d%/} "; done
-    mkdir -p "$PREFIX/lib/cmake/occt"
-    {
-        echo "set(OpenCASCADE_FOUND TRUE)"
-        echo "set(OpenCASCADE_INCLUDE_DIR \"$S/src\")"
-        for d in "$S"/src/*/; do echo "list(APPEND OpenCASCADE_INCLUDE_DIR \"${d%/}\")"; done
-        for lib in TKXDESTEP TKSTEP TKSTEP209 TKSTEPAttr TKSTEPBase TKXCAF TKXSBase TKVCAF TKCAF TKLCAF TKCDF TKV3d TKService TKMesh TKBO TKPrim TKHLR TKShHealing TKTopAlgo TKGeomAlgo TKBRep TKGeomBase TKG3d TKG2d TKMath TKernel; do
-            echo "if(NOT TARGET $lib)"
-            echo "    add_library($lib STATIC IMPORTED)"
-            echo "    set_target_properties($lib PROPERTIES IMPORTED_LOCATION \"$PREFIX/lib/lib${lib}.a\" INTERFACE_INCLUDE_DIRECTORIES \"\${OpenCASCADE_INCLUDE_DIR}\")"
-            echo "endif()"
-            ar rcs "$PREFIX/lib/lib${lib}.a" 2>/dev/null
-        done
-        echo "set(OpenCASCADE_LIBRARIES TKXDESTEP TKSTEP TKSTEP209 TKSTEPAttr TKSTEPBase TKXCAF TKXSBase TKVCAF TKCAF TKLCAF TKCDF TKV3d TKService TKMesh TKBO TKPrim TKHLR TKShHealing TKTopAlgo TKGeomAlgo TKBRep TKGeomBase TKG3d TKG2d TKMath TKernel)"
-    } > "$PREFIX/lib/cmake/occt/OpenCASCADEConfig.cmake"
+    wait_file "$LOG/freetype.done" || exit 1
+    REPO=$ROOT/../..
+    ( cd "$S" && patch -p1 --fuzz=3 < "$REPO/deps/OCCT/0001-OCCT-fix.patch" ) >>"$LOG/occt.log" 2>&1 \
+        || log "NOTE: occt patch did not apply cleanly (continuing)"
+    cmake_build occt "$S" "$BLD/occt" \
+        -DBUILD_LIBRARY_TYPE=Static \
+        -DUSE_TK=OFF -DUSE_TBB=OFF -DUSE_FFMPEG=OFF -DUSE_VTK=OFF -DUSE_XLIB=OFF \
+        -DUSE_FREETYPE=ON \
+        -DBUILD_DOC_Overview=OFF \
+        -DBUILD_MODULE_Draw=OFF -DBUILD_MODULE_Visualization=OFF \
+        -DOPENGL_INCLUDE_DIR="$PREFIX/include" -DOPENGL_gl_LIBRARY="$PREFIX/lib/libGL.a" \
+        || exit 1
+    ar rcs "$PREFIX/lib/libTKV3d.a"   # Visualization off; nothing references it
+    for lib in TKernel TKMath TKXDESTEP TKSTEP TKSTEPBase TKXSBase TKService TKBRep TKTopAlgo TKCAF TKCDF; do
+        [ -f "$PREFIX/lib/lib$lib.a" ] || { log "OCCT MISSING lib$lib.a"; exit 1; }
+    done
+    [ -f "$PREFIX/lib/cmake/occt/OpenCASCADEConfig.cmake" ] || { log "OCCT config missing"; exit 1; }
     done_marker occt
 fi
 

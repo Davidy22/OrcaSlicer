@@ -12,6 +12,10 @@
 #
 # After the chains finish, run configure_main.sh, then run_tests.sh.
 set -u
+# Optional: --no-chains  (recover git/swap/venv only; used before build_all.sh,
+# which launches the chains itself)
+LAUNCH_CHAINS=1
+[ "${1:-}" = "--no-chains" ] && LAUNCH_CHAINS=0
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO" || exit 1
 BRANCH=arena/5c7be923-orcaslicer
@@ -70,17 +74,21 @@ fi
 "$B/venv3/bin/cmake" --version | head -1
 
 mkdir -p "$B/log"
-echo "== chains =="
-if ! pgrep -f chain_a.sh >/dev/null; then
-    setsid nohup bash deps/sandbox/chain_a.sh < /dev/null > "$B/log/chain_a.out" 2>&1 &
-    echo "launched chain_a"
+if [ "$LAUNCH_CHAINS" = 1 ]; then
+    echo "== chains =="
+    if ! pgrep -f chain_a.sh >/dev/null; then
+        setsid nohup bash deps/sandbox/chain_a.sh < /dev/null > "$B/log/chain_a.out" 2>&1 &
+        echo "launched chain_a"
+    else
+        echo "chain_a already running"
+    fi
+    if ! pgrep -f chain_b.sh >/dev/null; then
+        setsid nohup bash deps/sandbox/chain_b.sh < /dev/null > "$B/log/chain_b.out" 2>&1 &
+        echo "launched chain_b"
+    else
+        echo "chain_b already running"
+    fi
 else
-    echo "chain_a already running"
-fi
-if ! pgrep -f chain_b.sh >/dev/null; then
-    setsid nohup bash deps/sandbox/chain_b.sh < /dev/null > "$B/log/chain_b.out" 2>&1 &
-    echo "launched chain_b"
-else
-    echo "chain_b already running"
+    echo "== chains skipped (--no-chains) =="
 fi
 echo "recovery complete"
