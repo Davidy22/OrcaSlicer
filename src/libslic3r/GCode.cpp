@@ -2470,6 +2470,11 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
     if (print->is_step_done(psGCodeExport) && boost::filesystem::exists(boost::filesystem::path(path)))
         return;
 
+    // Inner-wall purging tracks per-nozzle resident filaments across layers; start
+    // every export from a clean occupancy state (the first layer re-seeds it from
+    // the writer's active filament).
+    print->reset_inner_wall_purge_residents();
+
     BOOST_LOG_TRIVIAL(info) << boost::format("Will export G-code to %1% soon")%path;
 
     GCodeProcessor::s_IsBBLPrinter = print->is_BBL_printer();
@@ -5916,10 +5921,13 @@ LayerResult GCode::process_layer(
                 // Shall the support interface be printed with the active extruder, preferably with non-soluble, to avoid tool changes?
                 bool            interface_dontcare = object.config().support_interface_filament.value == 0;
 
-                // BBS: apply wiping overridden extruders
+                // BBS: apply wiping overridden extruders (copy-isolated: sequential
+                // prints resolve the current copy, layered prints share one
+                // override across copies because they share one transition).
                 WipingExtrusions& wiping_extrusions = const_cast<LayerTools&>(layer_tools).wiping_extrusions();
+                const size_t support_copy = single_object_instance_idx == size_t(-1) ? 0 : single_object_instance_idx;
                 if (support_dontcare) {
-                    int extruder_override = wiping_extrusions.get_support_extruder_overrides(&object);
+                    int extruder_override = wiping_extrusions.get_support_extruder_overrides(&object, support_copy);
                     if (extruder_override >= 0) {
                         support_extruder = extruder_override;
                         support_dontcare = false;
@@ -5927,7 +5935,7 @@ LayerResult GCode::process_layer(
                 }
 
                 if (interface_dontcare) {
-                    int extruder_override = wiping_extrusions.get_support_interface_extruder_overrides(&object);
+                    int extruder_override = wiping_extrusions.get_support_interface_extruder_overrides(&object, support_copy);
                     if (extruder_override >= 0) {
                         interface_extruder = extruder_override;
                         interface_dontcare = false;
@@ -6086,6 +6094,14 @@ LayerResult GCode::process_layer(
                             if (is_anything_overridden && use_overrides) {
                                 entity_overrides = const_cast<LayerTools&>(layer_tools).wiping_extrusions().get_extruder_overrides(overrides_key, layer_to_print.original_object, correct_extruder_id, layer_to_print.object()->instances().size());
                                 if (entity_overrides == nullptr) {
+                                    printing_extruders.emplace_back(correct_extruder_id);
+                                } else if (layer_tools.is_mixed_slot(correct_extruder_id)) {
+                                    // A mixed-color slot's geometry is emitted by the sublayer
+                                    // emitter in per-component bands. A purge override on such an
+                                    // entity records the allocation (ordering + accounting); it
+                                    // must not redirect the entity into a component's ordinary
+                                    // plan, which would print it at full height and bypass the
+                                    // band emission entirely.
                                     printing_extruders.emplace_back(correct_extruder_id);
                                 } else {
                                     printing_extruders.reserve(entity_overrides->size());
@@ -6548,10 +6564,10 @@ LayerResult GCode::process_layer(
                     this->set_origin(unscale(offset));
                     ExtrusionEntityCollection support_eec;
 
-                    // BBS
+                    // BBS: support overrides are copy-isolated; resolve this copy's.
                     WipingExtrusions& wiping_extrusions = const_cast<LayerTools&>(layer_tools).wiping_extrusions();
-                    bool support_overridden = wiping_extrusions.is_support_overridden(layer_to_print.original_object);
-                    bool support_intf_overridden = wiping_extrusions.is_support_interface_overridden(layer_to_print.original_object);
+                    bool support_overridden = wiping_extrusions.is_support_overridden(layer_to_print.original_object, instance_to_print.instance_id);
+                    bool support_intf_overridden = wiping_extrusions.is_support_interface_overridden(layer_to_print.original_object, instance_to_print.instance_id);
 
                     ExtrusionRole support_extrusion_role = instance_to_print.object_by_extruder.support_extrusion_role;
                     bool is_overridden = support_extrusion_role == erSupportMaterialInterface ? support_intf_overridden : support_overridden;
@@ -6725,7 +6741,12 @@ LayerResult GCode::process_layer(
             m_sub_layer_height     = default_sub_h;
             m_nominal_z            = default_sub_z;
 
+            // Towerless inner-wall purging allocates the component transitions to
+            // hidden geometry (emitted below); zero the macro/chute purge so it is
+            // not duplicated here.
+            m_inner_wall_toolchange = print.flush_into_inner_walls() && !print.has_wipe_tower();
             gcode += this->set_extruder(extruder_id, default_sub_z);
+            m_inner_wall_toolchange = false;
 
             for (InstanceToPrint &instance_to_print : mixed_instances_it->second.first) {
                 const bool use_per_volume = grp.is_gradient
@@ -6921,6 +6942,52 @@ LayerResult GCode::process_layer(
                     return false;
                 };
 
+                // Copy-specific split of this instance's entities: entities whose
+                // wiping override targets THIS component (the purge allocated for the
+                // transition into it) print first, innermost perimeters first, so the
+                // contamination is flushed into the hidden purge walls at this
+                // component's actual sub-Z/flow before any visible geometry of the
+                // component. Their remaining bands are emitted by the other
+                // components' normal passes, so nothing is emitted twice and no
+                // component portion is erased.
+                const size_t mix_copy = instance_to_print.instance_id;
+                WipingExtrusions &mix_wiping = const_cast<LayerTools &>(layer_tools).wiping_extrusions();
+                const PrintObject *mix_object = &instance_to_print.print_object;
+                auto split_purge_for_component = [&](const std::vector<ObjectByExtruder::Island::Region> &src_regions,
+                                                     std::vector<ObjectByExtruder::Island::Region> &purge_regions,
+                                                     std::vector<ObjectByExtruder::Island::Region> &rest_regions) {
+                    purge_regions.clear();
+                    rest_regions.clear();
+                    purge_regions.resize(src_regions.size());
+                    rest_regions.resize(src_regions.size());
+                    auto split_one = [&](const ExtrusionEntitiesPtr &entities,
+                                         ExtrusionEntitiesPtr &purge_out, ExtrusionEntitiesPtr &rest_out) {
+                        std::vector<std::pair<int, ExtrusionEntity *>> ordered;
+                        for (size_t i = 0; i < entities.size(); ++i) {
+                            // Mixed-slot entities are allocated per component band
+                            // in the wiping allocator's mixed purge map (keyed by the
+                            // flattened loop, object and copy).
+                            const std::set<unsigned int> *allocated = mix_wiping.mixed_purge_components(entities[i], mix_object, mix_copy);
+                            if (allocated == nullptr || allocated->count(extruder_id) == 0) {
+                                rest_out.emplace_back(entities[i]);
+                                continue;
+                            }
+                            const ExtrusionEntity *leaf = entities[i];
+                            while (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(leaf))
+                                leaf = collection->entities.front();
+                            ordered.emplace_back(leaf->inset_idx, entities[i]);
+                        }
+                        std::stable_sort(ordered.begin(), ordered.end(),
+                                         [](const auto &a, const auto &b) { return a.first > b.first; });
+                        for (auto &[inset, entity] : ordered)
+                            purge_out.emplace_back(entity);
+                    };
+                    for (size_t r = 0; r < src_regions.size(); ++r) {
+                        split_one(src_regions[r].perimeters, purge_regions[r].perimeters, rest_regions[r].perimeters);
+                        split_one(src_regions[r].infills, purge_regions[r].infills, rest_regions[r].infills);
+                    }
+                };
+
                 for (auto &entry : emit_plan) {
                     if (entry.skip)
                         continue;
@@ -6943,22 +7010,52 @@ LayerResult GCode::process_layer(
                         }
                         const auto &by_region_specific = entry.region_filter ? subset_storage : src;
 
-                        // Orca resolves infill-first per region inside extrude_perimeters()
-                        // (unlike BBS, which branches on a single global flag), so mirror the
-                        // main instance loop's ordering exactly.
-                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false);
-                        if (!has_wipe_tower && need_insert_timelapse_gcode_for_traditional
-                            && printer_structure == PrinterStructure::psI3
-                            && !has_insert_timelapse_gcode && plan_has_infill(by_region_specific)) {
-                            gcode += this->retract(false, false, auto_lift_type, true);
-                            gcode += insert_timelapse_gcode();
-                            has_insert_timelapse_gcode = true;
+                        if (is_anything_overridden) {
+                            std::vector<ObjectByExtruder::Island::Region> purge_regions, rest_regions;
+                            split_purge_for_component(by_region_specific, purge_regions, rest_regions);
+                            bool any_purge = false;
+                            for (const auto &r : purge_regions)
+                                any_purge |= !r.perimeters.empty() || !r.infills.empty();
+                            if (any_purge) {
+                                gcode += "; PURGE INNER WALLS\n";
+                                gcode += this->extrude_perimeters(print, purge_regions, first_layer, false);
+                                gcode += this->extrude_infill(print, purge_regions, false);
+                                gcode += "; END PURGE INNER WALLS\n";
+                            }
+                            // Orca resolves infill-first per region inside extrude_perimeters()
+                            // (unlike BBS, which branches on a single global flag), so mirror the
+                            // main instance loop's ordering exactly.
+                            gcode += this->extrude_perimeters(print, rest_regions, first_layer, false);
+                            if (!has_wipe_tower && need_insert_timelapse_gcode_for_traditional
+                                && printer_structure == PrinterStructure::psI3
+                                && !has_insert_timelapse_gcode && plan_has_infill(rest_regions)) {
+                                gcode += this->retract(false, false, auto_lift_type, true);
+                                gcode += insert_timelapse_gcode();
+                                has_insert_timelapse_gcode = true;
+                            }
+                            gcode += this->extrude_infill(print, rest_regions, false);
+                            gcode += this->extrude_perimeters(print, rest_regions, first_layer, false, true);
+                            gcode += this->extrude_perimeters(print, rest_regions, first_layer, true);
+                            // ironing
+                            gcode += this->extrude_infill(print, rest_regions, true);
+                        } else {
+                            // Orca resolves infill-first per region inside extrude_perimeters()
+                            // (unlike BBS, which branches on a single global flag), so mirror the
+                            // main instance loop's ordering exactly.
+                            gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false);
+                            if (!has_wipe_tower && need_insert_timelapse_gcode_for_traditional
+                                && printer_structure == PrinterStructure::psI3
+                                && !has_insert_timelapse_gcode && plan_has_infill(by_region_specific)) {
+                                gcode += this->retract(false, false, auto_lift_type, true);
+                                gcode += insert_timelapse_gcode();
+                                has_insert_timelapse_gcode = true;
+                            }
+                            gcode += this->extrude_infill(print, by_region_specific, false);
+                            gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false, true);
+                            gcode += this->extrude_perimeters(print, by_region_specific, first_layer, true);
+                            // ironing
+                            gcode += this->extrude_infill(print, by_region_specific, true);
                         }
-                        gcode += this->extrude_infill(print, by_region_specific, false);
-                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false, true);
-                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, true);
-                        // ironing
-                        gcode += this->extrude_infill(print, by_region_specific, true);
                     }
                 }
 

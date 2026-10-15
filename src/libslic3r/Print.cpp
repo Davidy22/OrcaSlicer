@@ -1732,8 +1732,12 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
 
-    if (flush_into_inner_walls() && (m_config.spiral_mode || nozzles != 1 || m_config.enable_mixed_color_sublayer))
-        return {L("Flush into inner walls requires a single physical nozzle, normal layers, and mixed-color sublayers disabled."), nullptr, "flush_into_inner_walls"};
+    // Multi-head/multi-nozzle printers and mixed-color sublayers are supported by
+    // the inner-wall purge planner (per-nozzle transitions, per-component capacity).
+    // Spiral vase remains a truthful conflict: a single continuous outer wall leaves
+    // no hidden inner wall to purge into.
+    if (flush_into_inner_walls() && m_config.spiral_mode)
+        return {L("Flush into inner walls is not compatible with spiral vase mode."), nullptr, "flush_into_inner_walls"};
 
     // Orca: a gradient mixed filament only renders its gradient with "Mixed color sublayer" on;
     // without it ToolOrdering::resolve_mixed_filaments prints one whole component per layer and
@@ -3011,6 +3015,9 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 
         }
         if (flush_into_inner_walls() && !has_wipe_tower()) {
+            // Fresh per-nozzle resident state for this planning run: the first
+            // filament is the resident of its own nozzle, every other nozzle empty.
+            reset_inner_wall_purge_residents();
             if (m_config.print_sequence == PrintSequence::ByObject) {
                 unsigned int current = unsigned(-1);
                 for (PrintObject *object : m_objects)
@@ -4629,10 +4636,18 @@ void Print::_make_wipe_tower()
                                 ? m_config.flush_multiplier_fast.get_at(extruder_id)
                                 : m_config.flush_multiplier.get_at(extruder_id);
                             volume_to_purge *= flush_multiplier;
-                            if (flush_into_inner_walls())
-                                volume_to_purge = purge_volume_for_transition(prev_nozzle_filament, filament_id);
-                            volume_to_purge = layer_tools.wiping_extrusions().mark_wiping_extrusions(
-                                *this, current_filament_id, filament_id, volume_to_purge);
+                            if (flush_into_inner_walls()) {
+                                // The allocator must receive the material actually being
+                                // displaced in the destination nozzle (its resident), not
+                                // the globally active filament, and the destination
+                                // nozzle's own matrix/multiplier.
+                                volume_to_purge = purge_volume_for_transition(prev_nozzle_filament, filament_id, size_t(extruder_id));
+                                volume_to_purge = layer_tools.wiping_extrusions().mark_wiping_extrusions(
+                                    *this, size_t(prev_nozzle_filament), filament_id, volume_to_purge, nullptr, -1, size_t(extruder_id));
+                            } else {
+                                volume_to_purge = layer_tools.wiping_extrusions().mark_wiping_extrusions(
+                                    *this, current_filament_id, filament_id, volume_to_purge);
+                            }
                         }
                         nozzle_recorder.set_nozzle_status(nozzle_id, filament_id, extruder_id);
                     }
