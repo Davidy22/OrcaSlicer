@@ -3014,7 +3014,11 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 throw Slic3r::SlicingError("The print is empty. The model is not printable with current print settings.");
 
         }
-        if (flush_into_inner_walls() && !has_wipe_tower()) {
+        if (flush_into_inner_walls()) {
+            // The added-wall plan runs with or without a prime tower: the
+            // allocation priority credits dedicated purge objects first, then
+            // these added safe inner walls, then infill/support — the tower
+            // only takes the excess (as the option tooltip documents).
             // Fresh per-nozzle resident state for this planning run: the first
             // filament is the resident of its own nozzle, every other nozzle empty.
             reset_inner_wall_purge_residents();
@@ -3026,12 +3030,12 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                         ordering.sort_and_build_data(*object, current);
                         if (current == unsigned(-1)) current = ordering.first_extruder();
                         for (LayerTools &layer : ordering.layer_tools())
-                            plan_towerless_inner_wall_purge(layer, current, object, int(copy));
+                            plan_inner_wall_purge(layer, current, object, int(copy));
                     }
             } else {
                 unsigned int current = m_tool_ordering.first_extruder();
                 for (LayerTools &layer : m_tool_ordering.layer_tools())
-                    plan_towerless_inner_wall_purge(layer, current);
+                    plan_inner_wall_purge(layer, current);
             }
             warn_about_reduced_inner_wall_purge();
         }

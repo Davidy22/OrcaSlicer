@@ -605,7 +605,7 @@ void Print::record_inner_wall_purge(double z, unsigned int old_filament, unsigne
     m_inner_wall_purge_transitions[{object, copy, z, old_filament, new_filament, transition_extruder}] = stored;
 }
 
-void Print::plan_towerless_inner_wall_purge(LayerTools &layer, unsigned int &current, const PrintObject *object, int copy)
+void Print::plan_inner_wall_purge(LayerTools &layer, unsigned int &current, const PrintObject *object, int copy)
 {
     {
         std::scoped_lock lock(m_inner_wall_purge_mutex);

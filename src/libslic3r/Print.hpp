@@ -1038,7 +1038,7 @@ public:
     // printers index both per destination nozzle/extruder, not globally zero).
     float purge_volume_for_transition(unsigned int old_filament, unsigned int new_filament, size_t extruder_id = 0) const;
     void prepare_inner_wall_purge();
-    void plan_towerless_inner_wall_purge(LayerTools &layer, unsigned int &current,
+    void plan_inner_wall_purge(LayerTools &layer, unsigned int &current,
                                         const PrintObject *only_object = nullptr, int only_copy = -1);
     void record_inner_wall_purge(double z, unsigned int old_filament, unsigned int new_filament,
                                  const PurgeVolumeAllocation &allocation, const PrintObject *object = nullptr, int copy = -1,

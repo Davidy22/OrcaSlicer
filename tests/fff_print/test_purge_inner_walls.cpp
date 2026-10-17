@@ -205,6 +205,27 @@ TEST_CASE("A prime tower receives purge exceeding safe wall capacity", "[PurgeIn
     REQUIRE_FALSE(print.wipe_tower_data().tool_changes.empty());
 }
 
+TEST_CASE("Added purge walls take priority over the prime tower even with a single base wall", "[PurgeInnerWalls]")
+{
+    // Regression: the added-wall plan used to be gated on !has_wipe_tower(), so
+    // with the tower enabled (the default) and wall_loops=1 (no existing safe
+    // inner wall) the "Flush into inner walls" option had no effect at all.
+    auto config = purge_config("classic", 1000., true);
+    config.set_deserialize_strict({{"wall_loops", 1}});
+    Print print;
+    Model model;
+    init_two_color_cube(print, model, config);
+    print.process();
+    REQUIRE(print.has_wipe_tower());
+    const auto stats = print.inner_wall_purge_statistics();
+    REQUIRE(stats.requested > 0.);
+    REQUIRE(stats.inner_walls > 0.);
+    REQUIRE(stats.tower > 0.);
+    REQUIRE_THAT(stats.reduced, Catch::Matchers::WithinAbs(0., 1e-9));
+    const std::string output = gcode(print);
+    REQUIRE(output.find("; PURGE INNER WALLS") != std::string::npos);
+}
+
 TEST_CASE("Added purge walls obey the support rule across material regions", "[PurgeInnerWalls]")
 {
     Print print;
