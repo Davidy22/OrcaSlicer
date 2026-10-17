@@ -5900,7 +5900,7 @@ LayerResult GCode::process_layer(
         unsigned int current = m_inner_wall_initial_filament.value_or(m_writer.filament() ? m_writer.filament()->id() : layer_tools.extruders.front());
         m_inner_wall_initial_filament.reset();
         const PrintObject *object = single_object_instance_idx == size_t(-1) ? nullptr : layers.front().original_object;
-        const_cast<Print &>(print).plan_towerless_inner_wall_purge(const_cast<LayerTools &>(layer_tools), current, object,
+        const_cast<Print &>(print).plan_inner_wall_purge(const_cast<LayerTools &>(layer_tools), current, object,
             single_object_instance_idx == size_t(-1) ? -1 : int(single_object_instance_idx));
     }
     bool is_anything_overridden = const_cast<LayerTools&>(layer_tools).wiping_extrusions().is_anything_overridden();
