@@ -8167,6 +8167,23 @@ void PrintConfigDef::init_fff_params()
     def->mode    = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    // New purge-into-inner-walls options - replaces the prime tower
+    def = this->add("purge_into_inner_walls", coBool);
+    def->label = L("Purge into inner walls");
+    def->tooltip = L("Purge material after filament changes into inner wall loops instead of using a prime tower. "
+        "This replaces the prime tower and cannot be enabled with it. "
+        "Existing inner walls are used first. Extra walls are generated inward from the innermost wall only if needed.");
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("purge_inner_walls_max_extra_loops", coInt);
+    def->label = L("Max extra inner wall loops");
+    def->tooltip = L("Maximum number of extra inner wall loops that can be generated for purge material. "
+        "-1 means automatic until solid-equivalent.");
+    def->mode = comAdvanced;
+    def->min = -1;
+    def->set_default_value(new ConfigOptionInt(-1));
+
     def = this->add("flush_volumes_vector", coFloats);
     // BBS: remove _L()
     def->label = ("Purging volumes - load/unload volumes");
@@ -8241,6 +8258,23 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     // BBS: change data type to floats to add partplate logic
     def->set_default_value(new ConfigOptionFloats{ 220. });
+
+    // New purge-into-inner-walls options - replaces the prime tower
+    def = this->add("purge_into_inner_walls", coBool);
+    def->label = L("Purge into inner walls");
+    def->tooltip = L("Purge material after filament changes into inner wall loops instead of using a prime tower. "
+        "This replaces the prime tower and cannot be enabled with it. "
+        "Existing inner walls are used first. Extra walls are generated inward from the innermost wall only if needed.");
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("purge_inner_walls_max_extra_loops", coInt);
+    def->label = L("Max extra inner wall loops");
+    def->tooltip = L("Maximum number of extra inner wall loops that can be generated for purge material. "
+        "-1 means automatic until solid-equivalent.");
+    def->mode = comAdvanced;
+    def->min = -1;
+    def->set_default_value(new ConfigOptionInt(-1));
 
     def = this->add("prime_tower_width", coFloat);
     def->label = L("Width");
@@ -8398,6 +8432,26 @@ void PrintConfigDef::init_fff_params()
         "Colors of the objects will be mixed as a result. "
         "It will not take effect unless the prime tower is enabled.");
     def->set_default_value(new ConfigOptionBool(false));
+
+    // New purge-into-inner-walls options - replaces the prime tower
+    // This can be set per-object to prioritize objects for purge
+    def = this->add("purge_into_inner_walls", coBool);
+    def->category = L("Purge options");
+    def->label = L("Purge into inner walls");
+    def->tooltip = L("When enabled globally, this object's inner walls will be used for purge material. "
+        "Objects with this enabled are prioritized for purge allocation. "
+        "Inner walls are used first, extra walls are generated inward only if needed.");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("purge_inner_walls_max_extra_loops", coInt);
+    def->category = L("Purge options");
+    def->label = L("Max extra inner wall loops for purge");
+    def->tooltip = L("Safety cap on extra inner wall loops beyond existing walls for purge material. "
+        "-1 means auto until solid-equivalent.");
+    def->sidetext = L("loops");
+    def->mode = comAdvanced;
+    def->min = -1;
+    def->set_default_value(new ConfigOptionInt(-1));
 
     // Internal marker (not shown in any settings tab): identifies the auto-generated
     // belt purge prism so it can be updated/removed by the auto-manager and aligned
@@ -10455,6 +10509,18 @@ t_config_option_keys DynamicPrintConfig::normalize_fdm_2(int num_objects, int us
             //    //alh_opt->value = false;
             //}
         }
+        
+        // ORCA: Mutual exclusivity between purge_into_inner_walls and enable_prime_tower
+        // purge_into_inner_walls replaces the prime tower
+        ConfigOptionBool* purge_opt = this->option<ConfigOptionBool>("purge_into_inner_walls");
+        if (purge_opt != nullptr && ept_opt != nullptr) {
+            if (purge_opt->value && ept_opt->value) {
+                // Both enabled - disable prime tower (purge mode takes precedence)
+                ept_opt->value = false;
+                changed_keys.push_back("enable_prime_tower");
+            }
+        }
+        
         /* BBS：MusangKing - use "global->support->Independent support layer height" widget to replace previous assignment
         else {
             if (islh_opt) {

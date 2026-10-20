@@ -1205,10 +1205,39 @@ void MenuFactory::append_menu_items_flush_options(wxMenu* menu)
     ModelConfig& select_object_config = object_list->object(selection.get_object_idx())->config;
 
     wxMenu* flush_options_menu = new wxMenu();
+    
+    // Check if prime tower or purge mode is enabled globally
     auto can_flush = [&global_config]() {
         auto option = global_config.option("enable_prime_tower");
         return option ? option->getBool() : false;
     };
+    
+    // Check if purge into inner walls is enabled globally
+    auto can_purge_global = [&global_config]() {
+        auto option = global_config.option("purge_into_inner_walls");
+        return option ? option->getBool() : false;
+    };
+    
+    // Per-object purge_into_inner_walls option - enables this object for purge prioritization
+    // This works when global purge_into_inner_walls is enabled
+    append_menu_check_item(flush_options_menu, wxID_ANY, _L("Use for purge into inner walls"), "",
+        [&select_object_config, &global_config](wxCommandEvent&) {
+            const ConfigOption* option = select_object_config.option("purge_into_inner_walls");
+            if (!option) {
+                option = global_config.option("purge_into_inner_walls");
+            }
+            // Toggle per-object setting
+            select_object_config.set_key_value("purge_into_inner_walls", new ConfigOptionBool(!option->getBool()));
+            wxGetApp().obj_settings()->UpdateAndShow(true);
+        }, menu, can_purge_global,
+        [&select_object_config, &global_config]() {
+            const ConfigOption* option = select_object_config.option("purge_into_inner_walls");
+            if (!option) {
+                option = global_config.option("purge_into_inner_walls");
+            }
+            return option ? option->getBool() : false;
+        }, m_parent);
+
     append_menu_check_item(flush_options_menu, wxID_ANY, _L("Flush into objects' infill"), "",
         [&select_object_config, &global_config](wxCommandEvent&) {
             const ConfigOption* option = select_object_config.option(FREQ_SETTINGS_BUNDLE_FFF["Flush options"][0]);

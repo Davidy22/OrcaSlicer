@@ -269,7 +269,7 @@ void Print::_plan_belt_purge()
                 wipe_volumes[current_extruder_id][extruder_id] * flush_multiplier :
                 (float) m_config.prime_volume;
             float leftover = layer_tools.wiping_extrusions().mark_wiping_extrusions(*this, current_extruder_id, extruder_id,
-                                                                                    volume_to_wipe);
+                                                                                    volume_to_wipe, m_tool_ordering.m_stats_by_single_extruder);
             layer_leftover += leftover;
             current_extruder_id = extruder_id;
         }

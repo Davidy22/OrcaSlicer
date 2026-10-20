@@ -150,6 +150,11 @@ public:
     double min_mm3_per_mm() const override;
     double total_volume() const override { double volume=0.; for (const auto& ent : entities) volume+=ent->total_volume(); return volume; }
 
+    // ORCA: Purge into inner walls - check if this collection contains purge inner wall candidates
+    bool is_purge_inner_wall_candidate() const;
+    bool is_existing_purge_wall() const;
+    int get_max_inset_idx() const;
+
     // Following methods shall never be called on an ExtrusionEntityCollection.
     Polyline as_polyline() const override {
         throw Slic3r::RuntimeError("Calling as_polyline() on a ExtrusionEntityCollection");

@@ -1349,6 +1349,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     // BBS
     ((ConfigOptionBool,                flush_into_infill))
     ((ConfigOptionBool,                flush_into_support))
+    // New purge-into-inner-walls options - replaces prime tower
+    ((ConfigOptionBool,                purge_into_inner_walls))
+    ((ConfigOptionInt,                 purge_inner_walls_max_extra_loops))
     // Marker for the auto-generated belt purge prism; identifies the object to
     // the auto-manager (GUI) and the layer-grid alignment step (backend).
     ((ConfigOptionBool,                belt_purge_tower_object))
@@ -2073,6 +2076,9 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // BBS: change wipe_tower_x and wipe_tower_y data type to floats to add partplate logic
     ((ConfigOptionFloats,             wipe_tower_x))
     ((ConfigOptionFloats,             wipe_tower_y))
+    // New purge-into-inner-walls options - replaces prime tower
+    ((ConfigOptionBool,               purge_into_inner_walls))
+    ((ConfigOptionInt,                purge_inner_walls_max_extra_loops))
     ((ConfigOptionFloat,              prime_tower_width))
     ((ConfigOptionFloat,              wipe_tower_per_color_wipe))
     ((ConfigOptionFloat,              wipe_tower_rotation_angle))
