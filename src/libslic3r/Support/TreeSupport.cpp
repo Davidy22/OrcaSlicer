@@ -1,3 +1,4 @@
+#include "PurgeSupport.hpp"
 #include <boost/date_time/posix_time/ptime.hpp>
 #include <boost/date_time/posix_time/posix_time_types.hpp>
 #include <cassert>
@@ -1825,8 +1826,15 @@ void TreeSupport::generate_toolpaths()
                         }
 
                         //ORCA: Keep per-area base paths grouped for outline->fill preservation.
-                        if (!base_eec->empty())
+                        if (!base_eec->empty()) {
+                            if (m_print_config->purge_into_inner_walls) {
+                                // Auto branches may already carry two native walls.
+                                const size_t base_walls = (need_infill && m_support_params.base_fill_pattern != ipLightning) ?
+                                    wall_count : std::max<size_t>(2, wall_count);
+                                ts_layer->purge_support_regions.emplace_back(*base_eec, ExPolygons{poly}, flow, base_walls);
+                            }
                             ts_layer->support_fills.entities.push_back(base_eec.release());
+                        }
                     }
                 }
 

@@ -1325,6 +1325,8 @@ static std::vector<std::string> s_Preset_print_options{
     "flush_into_infill",
     "flush_into_objects",
     "flush_into_support",
+    "purge_into_inner_walls",
+    "purge_into_inner_walls_preferred",
     "enable_mixed_color_sublayer",
     "tree_support_branch_angle",
     "tree_support_angle_slow",

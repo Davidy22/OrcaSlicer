@@ -1349,6 +1349,11 @@ PRINT_CONFIG_CLASS_DEFINE(
     // BBS
     ((ConfigOptionBool,                flush_into_infill))
     ((ConfigOptionBool,                flush_into_support))
+    // Per-object prioritization toggle for the purge-into-inner-walls feature:
+    // objects with this set are used as purge targets first and receive extra
+    // inner wall loops for purge capacity. The global feature toggle
+    // (purge_into_inner_walls) lives in PrintConfig.
+    ((ConfigOptionBool,                purge_into_inner_walls_preferred))
     // Marker for the auto-generated belt purge prism; identifies the object to
     // the auto-manager (GUI) and the layer-grid alignment step (backend).
     ((ConfigOptionBool,                belt_purge_tower_object))
@@ -2073,6 +2078,12 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // BBS: change wipe_tower_x and wipe_tower_y data type to floats to add partplate logic
     ((ConfigOptionFloats,             wipe_tower_x))
     ((ConfigOptionFloats,             wipe_tower_y))
+    // Global purge-into-inner-walls toggle - replaces the prime tower.
+    // Extra inner wall loops are grown automatically until the layer's purge
+    // volume fits (or the object is solid), so there is no loop-count cap option.
+    // (The per-object prioritization toggle is purge_into_inner_walls_preferred
+    // in PrintObjectConfig.)
+    ((ConfigOptionBool,               purge_into_inner_walls))
     ((ConfigOptionFloat,              prime_tower_width))
     ((ConfigOptionFloat,              wipe_tower_per_color_wipe))
     ((ConfigOptionFloat,              wipe_tower_rotation_angle))
@@ -2632,6 +2643,30 @@ static std::vector<T> get_flush_volumes_matrix(const std::vector<T> &fv_matrix, 
                                    fv_matrix.begin() + size_t(fv_matrix.size() / nozzle_nums * (extruder_id + 1) + EPSILON));
     }
     return fv_matrix;
+}
+
+// Estimated volume (mm3) that has to be purged on a filament change, mirroring
+// how the no-prime-tower purge paths (belt purge prism in _plan_belt_purge(),
+// purge into inner walls in _plan_purge_into_inner_walls()) derive their
+// per-toolchange volumes: flush matrix x flush_multiplier for single-extruder
+// multi-material with purging volumes enabled, plain prime volume otherwise.
+// For multi-nozzle printers the first nozzle's matrix is used. Filament ids are
+// zero-based matrix indices, as in LayerTools::extruders.
+inline float estimate_flush_volume(const PrintConfig &config, unsigned int from_filament, unsigned int to_filament)
+{
+    if (from_filament == to_filament)
+        return 0.f;
+    if (!(config.purge_in_prime_tower && config.single_extruder_multi_material))
+        return (float) config.prime_volume;
+    const std::vector<double> matrix = get_flush_volumes_matrix(
+        config.flush_volumes_matrix.values, 0, std::max<size_t>(config.nozzle_diameter.values.size(), 1));
+    unsigned int num_filaments = 0;
+    while (size_t(num_filaments) * num_filaments < matrix.size())
+        ++ num_filaments;
+    if (num_filaments == 0 || size_t(num_filaments) * num_filaments != matrix.size()
+        || from_filament >= num_filaments || to_filament >= num_filaments)
+        return (float) config.prime_volume;
+    return float(matrix[from_filament * num_filaments + to_filament]) * (float) config.flush_multiplier.get_at(0);
 }
 
 // std::vector<double> &out_matrix:

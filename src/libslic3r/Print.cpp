@@ -30,6 +30,7 @@
 #include <ostream>
 #include "ExPolygon.hpp"
 #include "Layer.hpp"
+#include "Support/PurgeSupport.hpp"
 #include "FilamentGroup.hpp"
 #include <memory>
 #include "FilamentGroupUtils.hpp"
@@ -522,6 +523,16 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             osteps.emplace_back(posSimplifySupportPath);
             steps.emplace_back(psSkirtBrim);
         }
+        else if (opt_key == "purge_into_inner_walls") {
+            // Inner walls are tagged as purge candidates during perimeter generation
+            // (and prioritized objects gain extra wall loops); purge allocation
+            // happens in the wipe tower step. This is a global (PrintConfig) key,
+            // so it never shows up in per-object config diffs.
+            osteps.emplace_back(posPerimeters);
+            osteps.emplace_back(posSupportMaterial);
+            osteps.emplace_back(posSimplifySupportPath);
+            steps.emplace_back(psWipeTower);
+        }
         else if (opt_key == "z_hop_types") {
             osteps.emplace_back(posDetectOverhangsForLift);
         }
@@ -557,6 +568,11 @@ void Print::set_calib_params(const Calib_Params& params) {
 bool Print::invalidate_step(PrintStep step)
 {
 	bool invalidated = Inherited::invalidate_step(step);
+    // Purge planning may restore/regrow support paths without regenerating
+    // support geometry. Those new paths still need the normal simplification.
+    if (step == psWipeTower && m_config.purge_into_inner_walls)
+        for (PrintObject *object : m_objects)
+            invalidated |= object->invalidate_steps({posSimplifySupportPath});
     // Propagate to dependent steps.
     if (step != psGCodeExport)
         invalidated |= Inherited::invalidate_step(psGCodeExport);
@@ -2192,6 +2208,14 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         if (m_config.enable_wrapping_detection)
             warn(L("A prime tower is required for clumping detection; otherwise, there may be flaws on the model."), "enable_prime_tower");
     }
+    
+    // ORCA: Purge into inner walls - warn about insufficient capacity
+    if (m_config.purge_into_inner_walls.getBool()) {
+        // Check statistics for insufficient capacity
+        // This would be populated during tool ordering
+        // For now, add a general warning that capacity may be insufficient
+        warn(L("Purge into inner walls is enabled. If model inner walls and supports do not have enough volume, purge material may not be fully absorbed and color contamination may occur. Consider using a prime tower if their capacity is insufficient."), "purge_into_inner_walls");
+    }
 
     if (m_config.spiral_mode) {
         size_t total_copies_count = 0;
@@ -3486,6 +3510,14 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         }
         else if (this->has_wipe_tower()) {
             this->_make_wipe_tower();
+        }
+        else if (m_config.purge_into_inner_walls.getBool() && !m_config.spiral_mode.value
+                 && this->config().print_sequence != PrintSequence::ByObject) {
+            // Purge into inner walls replaces the prime tower (mutually exclusive,
+            // see normalize_fdm), so has_wipe_tower() is false and _make_wipe_tower()
+            // would never mark any purge extrusions. Run the dedicated planner
+            // instead, mirroring _plan_belt_purge().
+            this->_plan_purge_into_inner_walls();
         }
         else if (this->config().print_sequence != PrintSequence::ByObject) {
             // Initialize the tool ordering, so it could be used by the G-code preview slider for planning tool changes and filament switches.
@@ -5207,7 +5239,7 @@ void Print::_make_wipe_tower()
                                 : m_config.flush_multiplier.get_at(extruder_id);
                             volume_to_purge *= flush_multiplier;
                             volume_to_purge = layer_tools.wiping_extrusions().mark_wiping_extrusions(
-                                *this, current_filament_id, filament_id, volume_to_purge);
+                                *this, current_filament_id, filament_id, volume_to_purge, m_tool_ordering.m_stats_by_single_extruder);
                         }
                         nozzle_recorder.set_nozzle_status(nozzle_id, filament_id, extruder_id);
                     }
@@ -5352,7 +5384,7 @@ void Print::_make_wipe_tower()
 
                             // try to assign some infills/objects for the wiping:
                             volume_to_wipe = layer_tools.wiping_extrusions().mark_wiping_extrusions(*this, current_extruder_id, extruder_id,
-                                                                                                    volume_to_wipe);
+                                                                                                    volume_to_wipe, m_tool_ordering.m_stats_by_single_extruder);
 
                             // add back the minimal amount toforce on the wipe tower:
                             volume_to_wipe += (float) m_config.filament_minimal_purge_on_wipe_tower.get_at(extruder_id);
@@ -5446,6 +5478,147 @@ void Print::_make_wipe_tower()
         // The cutter/purge corner is a physical obstacle — the brim must stay out like the body.
         if (!intersection(get_bed_excluded_area(m_config), Polygons{footprint}).empty())
             throw Slic3r::SlicingError(L("Prime tower is too close to an exclusion area, and collisions will be caused.\n"));
+    }
+}
+
+// Purge into inner walls: route filament-change purging into the tagged inner
+// wall loops instead of a prime tower. has_wipe_tower() is false in this mode
+// (normalize_fdm disables the prime tower), so _make_wipe_tower() never runs
+// and nothing would ever mark the purge extrusions without this planner.
+// Mirrors _plan_belt_purge(): build the tool ordering, then for every
+// toolchange mark inner walls as purge extrusions (prioritized objects first,
+// proportionally reduced when a layer's walls cannot absorb the full volume -
+// see WipingExtrusions::mark_wiping_extrusions()) and finally warn if some
+// purge volume could not be absorbed even after growing extra wall loops.
+void Print::_plan_purge_into_inner_walls()
+{
+    // Layers may be shared by identical objects. Restore each only once before
+    // measuring capacity; repeated planning must not accumulate support walls.
+    std::set<SupportLayer *> restored_supports;
+    for (PrintObject *object : m_objects)
+        for (SupportLayer *support : object->support_layers())
+            if (restored_supports.insert(support).second) {
+                // Generators register direct child groups. A pipeline hook may
+                // replace/regroup those paths: discard stale growth metadata
+                // rather than dereferencing a collection it no longer owns.
+                const std::unordered_set<const ExtrusionEntity *> groups(
+                    support->support_fills.entities.begin(), support->support_fills.entities.end());
+                auto &regions = support->purge_support_regions;
+                regions.erase(std::remove_if(regions.begin(), regions.end(), [&](const PurgeSupportRegion &region) {
+                    return groups.count(region.collection()) == 0;
+                }), regions.end());
+                for (PurgeSupportRegion &region : regions)
+                    region.reset();
+            }
+
+    // No initial priming extrusions: there is no tower to prime on.
+    m_wipe_tower_data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, false);
+    m_wipe_tower_data.tool_ordering.sort_and_build_data(*this, (unsigned int) -1, false);
+
+    if (m_wipe_tower_data.tool_ordering.empty() || m_wipe_tower_data.tool_ordering.last_extruder() == unsigned(-1))
+        throw Slic3r::SlicingError(_u8L("The print is empty. The model is not printable with current print settings."));
+
+    // Is there any filament change at all? Single-filament prints have nothing to purge.
+    {
+        bool         any_change = false;
+        unsigned int cur        = m_wipe_tower_data.tool_ordering.first_extruder();
+        for (const auto &lt : m_wipe_tower_data.tool_ordering.layer_tools())
+            for (const unsigned int e : lt.extruders)
+                if (e != cur) { any_change = true; cur = e; }
+        if (! any_change)
+            return;
+    }
+
+    this->throw_if_canceled();
+
+    // Model wall growth has already run, before model infill. Only its
+    // residual demand may increase support wall loops. Existing support fill
+    // and interfaces count first, so usable native support needs no extra walls.
+    PrintObjectPtrs support_objects = m_objects;
+    std::stable_sort(support_objects.begin(), support_objects.end(), [](const PrintObject *a, const PrintObject *b) {
+        return a->config().purge_into_inner_walls_preferred.getBool() > b->config().purge_into_inner_walls_preferred.getBool();
+    });
+    unsigned int previous_extruder = m_wipe_tower_data.tool_ordering.first_extruder();
+    for (LayerTools &tools : m_wipe_tower_data.tool_ordering.layer_tools()) {
+        double demand = 0.;
+        for (const unsigned int extruder : tools.extruders) {
+            if (WipingExtrusions::can_purge(m_config, previous_extruder, extruder))
+                demand += estimate_flush_volume(m_config, previous_extruder, extruder);
+            previous_extruder = extruder;
+        }
+        double deficit = demand - tools.wiping_extrusions().purge_capacity(*this);
+        if (deficit <= EPSILON)
+            continue;
+
+        // Account for every copy of a shared layer, while growing its physical
+        // toolpaths just once. Keep object order deterministic.
+        std::vector<std::pair<SupportLayer *, size_t>> supports;
+        for (PrintObject *object : support_objects) {
+            if (!tools.wiping_extrusions().is_support_overriddable(erSupportMaterial, *object))
+                continue;
+            SupportLayer *support = object->get_support_layer_at_printz(tools.print_z, EPSILON);
+            if (support == nullptr || object->instances().empty())
+                continue;
+            auto it = std::find_if(supports.begin(), supports.end(),
+                                   [support](const auto &item) { return item.first == support; });
+            if (it == supports.end())
+                supports.emplace_back(support, object->instances().size());
+            else
+                it->second += object->instances().size();
+        }
+        for (const auto &[support, copies] : supports) {
+            for (PurgeSupportRegion &region : support->purge_support_regions) {
+                deficit -= region.grow(deficit / double(copies)) * double(copies);
+                if (deficit <= EPSILON)
+                    break;
+                this->throw_if_canceled();
+            }
+            if (deficit <= EPSILON)
+                break;
+        }
+    }
+
+    float  total_leftover       = 0.f;
+    float  worst_layer_leftover = 0.f;
+    double worst_layer_z        = 0.;
+
+    unsigned int current_extruder_id = m_wipe_tower_data.tool_ordering.first_extruder();
+    for (auto &layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) {
+        float layer_leftover = 0.f;
+        for (const unsigned int extruder_id : layer_tools.extruders) {
+            if (extruder_id == current_extruder_id)
+                continue;
+            const float volume_to_wipe = estimate_flush_volume(m_config, current_extruder_id, extruder_id);
+            float leftover = layer_tools.wiping_extrusions().mark_wiping_extrusions(*this, current_extruder_id, extruder_id,
+                                                                                    volume_to_wipe, m_tool_ordering.m_stats_by_single_extruder);
+            layer_leftover += leftover;
+            current_extruder_id = extruder_id;
+        }
+
+        layer_tools.wiping_extrusions().ensure_perimeters_infills_order(*this);
+        if (layer_leftover > 0.f) {
+            total_leftover += layer_leftover;
+            if (layer_leftover > worst_layer_leftover) {
+                worst_layer_leftover = layer_leftover;
+                worst_layer_z        = layer_tools.print_z;
+            }
+        }
+        this->throw_if_canceled();
+    }
+
+    if (total_leftover > 1.f) {
+        const auto &stats = m_tool_ordering.m_stats_by_single_extruder;
+        this->active_step_add_warning(
+            PrintStateBase::WarningLevel::CRITICAL,
+            Slic3r::format(_u8L("Purge into inner walls could not absorb the full purge volume: %1% mm³ in total could not "
+                                "be purged into model inner walls or supports even after growing extra wall loops (worst layer: %2% mm³ at height %3%; "
+                                "affected toolchanges: %4%; affected layers: %5%). The purge volume was reduced proportionally on those "
+                                "layers, so the print may show color bleeding. Prioritize larger objects for purging, "
+                                "add supports, or use a prime tower instead."),
+                           int(std::ceil(total_leftover)), int(std::ceil(worst_layer_leftover)),
+                           Slic3r::float_to_string_decimal_point(worst_layer_z, 2),
+                           stats.purge_inner_walls_affected_transition_count,
+                           stats.purge_inner_walls_affected_layer_count));
     }
 }
 

@@ -587,6 +587,9 @@ protected:
         const ExtrusionEntityCollection  *support;
         // erSupportMaterial / erSupportMaterialInterface / erSupportTransition or erMixed.
         ExtrusionRole                     support_extrusion_role;
+        // Native body/interface filaments when support leaves are split among
+        // purge changes/copies. Empty preserves the legacy whole-role route.
+        std::optional<std::pair<unsigned int, unsigned int>> support_purge_extruders;
 
         struct Island
         {
@@ -645,6 +648,8 @@ protected:
     std::string     extrude_perimeters(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool is_first_layer, bool is_infill_first, bool unsupported_loops_only = false);
     std::string     extrude_infill(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool ironing);
     std::string     extrude_support(const ExtrusionEntityCollection& support_fills, const ExtrusionRole support_extrusion_role);
+    std::string     extrude_purge_support(const ObjectByExtruder& support, const WipingExtrusions& wiping,
+                                          const PrintObject& object, size_t copy_id, unsigned int extruder_id, bool purge_pass);
 
     // Farthest-point timelapse: find the extrusion point farthest from camera (0,0)
     void compute_farthest_point(const std::vector<LayerToPrint> &layers, int most_used_extruder,

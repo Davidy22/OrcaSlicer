@@ -3194,6 +3194,8 @@ void TabPrint::build()
         optgroup->append_single_option_line("preheat_steps", "multimaterial_settings_ooze_prevention#preheat-steps");
 
         optgroup = page->new_optgroup(L("Flush options"), L"param_flush");
+        optgroup->append_single_option_line("purge_into_inner_walls", "multimaterial_settings_purge_options#purge-into-inner-walls");
+        optgroup->append_single_option_line("purge_into_inner_walls_preferred", "multimaterial_settings_purge_options#purge-into-inner-walls");
         optgroup->append_single_option_line("flush_into_infill", "multimaterial_settings_flush_options#flush-into-objects-infill");
         optgroup->append_single_option_line("flush_into_objects", "multimaterial_settings_flush_options#flush-into-this-object");
         optgroup->append_single_option_line("flush_into_support", "multimaterial_settings_flush_options#flush-into-objects-support");

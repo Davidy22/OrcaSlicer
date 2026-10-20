@@ -7,6 +7,7 @@
 #include "libslic3r.h"
 #include "BoundingBox.hpp"
 #include "Flow.hpp"
+#include "Support/PurgeSupport.hpp"
 #include "SurfaceCollection.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include <vector>
@@ -31,6 +32,8 @@ class PrintRegion;
 class PrintRegionConfig;
 class PrintObject;
 class Print;
+class PrintConfig;
+class PrintObjectConfig;
 
 namespace FillAdaptive {
     struct RegionOctrees;
@@ -89,6 +92,16 @@ public:
     // (this collection contains only ExtrusionEntityCollection objects)
     ExtrusionEntityCollection   fills;
 
+    // ORCA: Purge into inner walls - plan for extra purge walls on this layer
+    struct PurgeInnerWallPlan {
+        int extra_loops = 0;
+        float existing_inner_wall_volume_mm3 = 0.f;
+        float target_volume_mm3 = 0.f;
+        float planned_volume_mm3 = 0.f;
+        bool capacity_limited = false;
+    };
+    PurgeInnerWallPlan purge_inner_wall_plan;
+
     Flow    flow(FlowRole role) const;
     Flow    flow(FlowRole role, double layer_height) const;
     Flow    bridging_flow(FlowRole role, bool thick_bridge = false) const;
@@ -97,6 +110,18 @@ public:
     void    prepare_fill_surfaces();
     //BBS
     void    make_perimeters(const SurfaceCollection &slices, const LayerRegionPtrs &compatible_regions, SurfaceCollection* fill_surfaces, ExPolygons* fill_no_overlap);
+    // ORCA: Purge into inner walls - capacity planning helpers, driven by
+    // PrintObject::make_perimeters() once perimeters have been generated.
+    // Volume (mm3, single copy) of generated inner walls tagged as purge candidates.
+    float   purge_candidate_volume() const;
+    // Cumulative volume (mm3, single copy) that 1, 2, ... additional inner wall
+    // loops would add on top of the wall_loops + already_added_loops loops that
+    // exist (or are already planned); marching stops early once volume_cap is
+    // reached, and the vector ends where this region turns solid.
+    std::vector<float> purge_extra_loop_cumulative_volumes(int already_added_loops, float volume_cap) const;
+    // Add extra_loops to Surface::extra_perimeters of the surfaces that can
+    // carry inner walls, to take effect on the next make_perimeters() run.
+    void    apply_purge_extra_perimeters(int extra_loops);
     void    process_external_surfaces(const Layer *lower_layer, const Polygons *lower_layer_covered);
     double  infill_area_threshold() const;
     // Trim surfaces by trimming polygons. Used by the elephant foot compensation at the 1st layer.
@@ -307,6 +332,8 @@ public:
     ExPolygons                  support_islands;
     // Extrusion paths for the support base and for the support interface and contacts.
     ExtrusionEntityCollection   support_fills;
+    // Runtime-only support wall growth, registered only in inner-wall purge mode.
+    std::vector<PurgeSupportRegion> purge_support_regions;
     SupportInnerType            support_type = stInnerNormal;
 
     // for tree supports

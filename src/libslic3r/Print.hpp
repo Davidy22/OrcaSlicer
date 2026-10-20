@@ -1463,6 +1463,10 @@ private:
     // Belt mode: route filament-change purging into the belt purge prism
     // (flush-into-objects) without generating a classic wipe tower.
     void                _plan_belt_purge();
+    // Purge into inner walls: route filament-change purging into tagged inner
+    // wall loops without generating a prime tower (has_wipe_tower() is false
+    // in this mode, so _make_wipe_tower() never runs). Mirrors _plan_belt_purge().
+    void                _plan_purge_into_inner_walls();
     // Belt mode: shift the purge prism's layer grid to match the printed
     // objects' grid so toolchange layers find prism layers to purge into.
     void                _align_belt_purge_layers();

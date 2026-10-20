@@ -91,7 +91,7 @@ static SettingsFactory::Bundle FREQ_SETTINGS_BUNDLE_FFF =
                                     "support_remove_small_overhang",
                                     "support_base_pattern_spacing", "support_expansion"}},
     //BBS
-    { L("Flush options")         , { "flush_into_infill", "flush_into_objects", "flush_into_support"} }
+    { L("Flush options")         , { "flush_into_infill", "flush_into_objects", "flush_into_support", "purge_into_inner_walls_preferred"} }
 };
 
 // pt_SLA
@@ -1186,7 +1186,11 @@ void MenuFactory::append_menu_items_flush_options(wxMenu* menu)
     if (item_id != wxNOT_FOUND)
         menu->Destroy(item_id);
 
-    bool show_flush_option_menu = false;
+    DynamicPrintConfig& global_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+    // A purge target can be chosen before slicing, including on a painted
+    // object whose multiple filaments are not yet in the plate's tool list.
+    const ConfigOption *purge_option = global_config.option("purge_into_inner_walls");
+    bool show_flush_option_menu = purge_option && purge_option->getBool();
     ObjectList* object_list = obj_list();
     const Selection& selection = get_selection();
     if (selection.get_object_idx() < 0)
@@ -1201,14 +1205,46 @@ void MenuFactory::append_menu_items_flush_options(wxMenu* menu)
     if (!show_flush_option_menu)
         return;
 
-    DynamicPrintConfig& global_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
     ModelConfig& select_object_config = object_list->object(selection.get_object_idx())->config;
 
     wxMenu* flush_options_menu = new wxMenu();
+    
+    // Check if prime tower or purge mode is enabled globally
     auto can_flush = [&global_config]() {
         auto option = global_config.option("enable_prime_tower");
         return option ? option->getBool() : false;
     };
+    
+    // Check if purge into inner walls is enabled globally
+    auto can_purge_global = [&global_config]() {
+        auto option = global_config.option("purge_into_inner_walls");
+        return option ? option->getBool() : false;
+    };
+    
+    // Per-object purge_into_inner_walls_preferred option - this object is used as a
+    // purge target first and receives extra inner wall loops for purge capacity.
+    // Only takes effect when global purge_into_inner_walls is enabled.
+    append_menu_check_item(flush_options_menu, wxID_ANY, _L("Prioritize for purge into inner walls"), "",
+        [&select_object_config, &global_config](wxCommandEvent&) {
+            const ConfigOption* option = select_object_config.option("purge_into_inner_walls_preferred");
+            if (!option) {
+                option = global_config.option("purge_into_inner_walls_preferred");
+            }
+            // Toggle per-object setting
+            const bool current = option ? option->getBool() : false;
+            select_object_config.set_key_value("purge_into_inner_walls_preferred", new ConfigOptionBool(!current));
+            wxGetApp().obj_settings()->UpdateAndShow(true);
+            wxGetApp().params_panel()->notify_object_config_changed();
+            wxGetApp().plater()->schedule_background_process();
+        }, menu, can_purge_global,
+        [&select_object_config, &global_config]() {
+            const ConfigOption* option = select_object_config.option("purge_into_inner_walls_preferred");
+            if (!option) {
+                option = global_config.option("purge_into_inner_walls_preferred");
+            }
+            return option ? option->getBool() : false;
+        }, m_parent);
+
     append_menu_check_item(flush_options_menu, wxID_ANY, _L("Flush into objects' infill"), "",
         [&select_object_config, &global_config](wxCommandEvent&) {
             const ConfigOption* option = select_object_config.option(FREQ_SETTINGS_BUNDLE_FFF["Flush options"][0]);
