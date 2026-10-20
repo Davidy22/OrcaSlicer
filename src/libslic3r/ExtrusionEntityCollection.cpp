@@ -154,8 +154,53 @@ double ExtrusionEntityCollection::min_mm3_per_mm() const
 {
     double min_mm3_per_mm = std::numeric_limits<double>::max();
     for (const ExtrusionEntity *entity : this->entities)
-    	min_mm3_per_mm = std::min(min_mm3_per_mm, entity->min_mm3_per_mm());
+        min_mm3_per_mm = std::min(min_mm3_per_mm, entity->min_mm3_per_mm());
     return min_mm3_per_mm;
+}
+
+// ORCA: Purge into inner walls - check if this collection contains purge inner wall candidates
+bool ExtrusionEntityCollection::is_purge_inner_wall_candidate() const
+{
+    for (const auto& entity : this->entities) {
+        if (entity->is_loop()) {
+            const ExtrusionLoop* loop = static_cast<const ExtrusionLoop*>(entity);
+            if (loop->is_purge_inner_wall_candidate)
+                return true;
+        }
+    }
+    return false;
+}
+
+// Check if this collection represents existing (non-generated) purge walls
+bool ExtrusionEntityCollection::is_existing_purge_wall() const
+{
+    for (const auto& entity : this->entities) {
+        if (entity->is_loop()) {
+            const ExtrusionLoop* loop = static_cast<const ExtrusionLoop*>(entity);
+            if (loop->is_purge_inner_wall_candidate && !loop->generated_for_purge)
+                return true;
+        }
+    }
+    return false;
+}
+
+// Get the maximum inset_idx among loops in this collection
+int ExtrusionEntityCollection::get_max_inset_idx() const
+{
+    int max_idx = -1;
+    for (const auto& entity : this->entities) {
+        if (entity->is_loop()) {
+            const ExtrusionLoop* loop = static_cast<const ExtrusionLoop*>(entity);
+            if (loop->is_purge_inner_wall_candidate) {
+                // Find max inset_idx in this loop's paths
+                for (const ExtrusionPath& path : loop->paths) {
+                    if (path.inset_idx > max_idx)
+                        max_idx = path.inset_idx;
+                }
+            }
+        }
+    }
+    return max_idx;
 }
 
 }

@@ -31,6 +31,8 @@ class PrintRegion;
 class PrintRegionConfig;
 class PrintObject;
 class Print;
+class PrintConfig;
+class PrintObjectConfig;
 
 namespace FillAdaptive {
     struct RegionOctrees;
@@ -89,6 +91,16 @@ public:
     // (this collection contains only ExtrusionEntityCollection objects)
     ExtrusionEntityCollection   fills;
 
+    // ORCA: Purge into inner walls - plan for extra purge walls on this layer
+    struct PurgeInnerWallPlan {
+        int extra_loops = 0;
+        float existing_inner_wall_volume_mm3 = 0.f;
+        float target_volume_mm3 = 0.f;
+        float planned_volume_mm3 = 0.f;
+        bool capacity_limited = false;
+    };
+    PurgeInnerWallPlan purge_inner_wall_plan;
+
     Flow    flow(FlowRole role) const;
     Flow    flow(FlowRole role, double layer_height) const;
     Flow    bridging_flow(FlowRole role, bool thick_bridge = false) const;
@@ -97,6 +109,10 @@ public:
     void    prepare_fill_surfaces();
     //BBS
     void    make_perimeters(const SurfaceCollection &slices, const LayerRegionPtrs &compatible_regions, SurfaceCollection* fill_surfaces, ExPolygons* fill_no_overlap);
+    // ORCA: Purge into inner walls - add extra walls for purge capacity (called before make_perimeters)
+    void    add_purge_extra_walls(const PrintConfig& print_config, const PrintObjectConfig& object_config);
+    // ORCA: Purge into inner walls - plan extra walls for purge capacity
+    void    plan_purge_inner_walls(const PrintConfig& print_config, const PrintObjectConfig& object_config);
     void    process_external_surfaces(const Layer *lower_layer, const Polygons *lower_layer_covered);
     double  infill_area_threshold() const;
     // Trim surfaces by trimming polygons. Used by the elephant foot compensation at the 1st layer.

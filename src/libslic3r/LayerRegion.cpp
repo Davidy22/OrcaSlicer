@@ -170,6 +170,99 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         g.process_arachne();
     else
         g.process_classic();
+
+    // ORCA: Purge into inner walls - plan extra walls if needed
+    if (print_config.purge_into_inner_walls.getBool()) {
+        this->plan_purge_inner_walls(print_config, object_config);
+    }
+}
+
+// ORCA: Add extra purge inner walls before perimeter generation
+// This is called before make_perimeters to add extra inner wall loops for purge capacity
+void LayerRegion::add_purge_extra_walls(const PrintConfig& print_config, const PrintObjectConfig& object_config)
+{
+    // Only add extra walls if:
+    // 1. Global purge_into_inner_walls is enabled
+    // 2. This object has purge_into_inner_walls enabled (prioritized for purge)
+    if (!print_config.purge_into_inner_walls.getBool())
+        return;
+    if (!object_config.purge_into_inner_walls.getBool())
+        return;
+    
+    // Need at least 1 wall loop to add extra walls
+    // wall_loops=0 means no walls at all, can't add purge walls
+    if (region().config().wall_loops.value < 1)
+        return;
+    
+    // Add extra perimeter loops for purge capacity
+    // The extra_perimeters mechanism adds walls inward from existing perimeters
+    // This works for any object with at least one wall loop
+    // Extra walls are generated inward from the innermost existing wall
+    
+    // Add 1 extra inner wall loop for purge capacity on all surfaces
+    // that can have internal perimeters (not just top/bottom surfaces)
+    for (Surface& surface : this->slices.surfaces) {
+        // Only add to surfaces that can have internal perimeters
+        // stInternal surfaces already have internal area
+        // For other surface types, we can still add extra perimeters inward
+        if (surface.surface_type == stInternal || 
+            surface.is_external()) {
+            surface.extra_perimeters++;
+        }
+    }
+}
+
+// ORCA: Purge into inner walls - measure existing inner wall volume and plan extra walls
+void LayerRegion::plan_purge_inner_walls(const PrintConfig& print_config, const PrintObjectConfig& object_config)
+{
+    // Measure existing inner wall volume (purge candidates only)
+    float existing_volume = 0.f;
+    int max_existing_inset = -1;
+    int existing_loop_count = 0;
+    
+    for (const ExtrusionEntity* ee : this->perimeters.entities) {
+        auto* coll = dynamic_cast<const ExtrusionEntityCollection*>(ee);
+        if (!coll)
+            continue;
+        
+        // Check if any contained loop is a purge candidate
+        bool has_purge_candidate = false;
+        int coll_max_inset = -1;
+        for (const ExtrusionEntity* child : coll->entities) {
+            auto* loop = dynamic_cast<const ExtrusionLoop*>(child);
+            if (loop && loop->is_purge_inner_wall_candidate) {
+                has_purge_candidate = true;
+                // Find max inset_idx in this loop's paths
+                for (const ExtrusionPath& path : loop->paths) {
+                    if (path.inset_idx > coll_max_inset)
+                        coll_max_inset = path.inset_idx;
+                }
+            }
+        }
+        
+        if (!has_purge_candidate)
+            continue;
+        
+        existing_volume += coll->total_volume();
+        existing_loop_count++;
+        
+        if (coll_max_inset > max_existing_inset)
+            max_existing_inset = coll_max_inset;
+    }
+    
+    // Store existing volume in plan
+    this->purge_inner_wall_plan.existing_inner_wall_volume_mm3 = existing_volume;
+    this->purge_inner_wall_plan.extra_loops = 0;
+    
+    // Note: Extra wall generation is handled during tool ordering when purge demand is known.
+    // The actual generation of extra walls would need to be integrated with the perimeter generator,
+    // which requires regenerating perimeters after knowing the demand. This is a complex operation
+    // that would require:
+    // 1. Computing purge demand per layer/transition
+    // 2. Determining if existing capacity is sufficient
+    // 3. Generating extra inner wall loops if needed
+    // 4. Ensuring downward support propagation
+    // For now, we track the existing capacity and leave extra generation as a future enhancement.
 }
 
 #if 1

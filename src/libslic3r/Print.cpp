@@ -2192,6 +2192,14 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         if (m_config.enable_wrapping_detection)
             warn(L("A prime tower is required for clumping detection; otherwise, there may be flaws on the model."), "enable_prime_tower");
     }
+    
+    // ORCA: Purge into inner walls - warn about insufficient capacity
+    if (m_config.purge_into_inner_walls.getBool()) {
+        // Check statistics for insufficient capacity
+        // This would be populated during tool ordering
+        // For now, add a general warning that capacity may be insufficient
+        warn(L("Purge into inner walls is enabled. If the objects do not have enough inner wall volume, purge material may not be fully absorbed and color contamination may occur. Ensure objects have sufficient internal walls or consider using a prime tower instead."), "purge_into_inner_walls");
+    }
 
     if (m_config.spiral_mode) {
         size_t total_copies_count = 0;
@@ -5207,7 +5215,7 @@ void Print::_make_wipe_tower()
                                 : m_config.flush_multiplier.get_at(extruder_id);
                             volume_to_purge *= flush_multiplier;
                             volume_to_purge = layer_tools.wiping_extrusions().mark_wiping_extrusions(
-                                *this, current_filament_id, filament_id, volume_to_purge);
+                                *this, current_filament_id, filament_id, volume_to_purge, m_tool_ordering.m_stats_by_single_extruder);
                         }
                         nozzle_recorder.set_nozzle_status(nozzle_id, filament_id, extruder_id);
                     }
@@ -5352,7 +5360,7 @@ void Print::_make_wipe_tower()
 
                             // try to assign some infills/objects for the wiping:
                             volume_to_wipe = layer_tools.wiping_extrusions().mark_wiping_extrusions(*this, current_extruder_id, extruder_id,
-                                                                                                    volume_to_wipe);
+                                                                                                    volume_to_wipe, m_tool_ordering.m_stats_by_single_extruder);
 
                             // add back the minimal amount toforce on the wipe tower:
                             volume_to_wipe += (float) m_config.filament_minimal_purge_on_wipe_tower.get_at(extruder_id);

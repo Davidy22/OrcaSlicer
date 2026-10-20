@@ -34,6 +34,7 @@ class PrintObject;
 class LayerTools;
 namespace CustomGCode { struct Item; }
 class PrintRegion;
+struct FilamentChangeStats;
 
 // Object of this class holds information about whether an extrusion is printed immediately
 // after a toolchange (as part of infill/perimeter wiping) or not. One extrusion can be a part
@@ -55,7 +56,8 @@ public:
 
     // This function goes through all infill entities, decides which ones will be used for wiping and
     // marks them by the extruder id. Returns volume that remains to be wiped on the wipe tower:
-    float mark_wiping_extrusions(const Print& print, unsigned int old_extruder, unsigned int new_extruder, float volume_to_wipe);
+    // stats: reference to FilamentChangeStats to update purge-into-inner-walls statistics
+    float mark_wiping_extrusions(const Print& print, unsigned int old_extruder, unsigned int new_extruder, float volume_to_wipe, FilamentChangeStats& stats);
 
     void ensure_perimeters_infills_order(const Print& print);
 
@@ -124,16 +126,36 @@ struct FilamentChangeStats
     int flush_filament_change_count{0};
     int filament_change_count{0};
 
+    // ORCA: Purge into inner walls statistics
+    float purge_inner_walls_requested_volume_mm3{0.f};
+    float purge_inner_walls_existing_volume_mm3{0.f};
+    float purge_inner_walls_extra_volume_mm3{0.f};
+    float purge_inner_walls_reduced_volume_mm3{0.f};
+    int purge_inner_walls_affected_layer_count{0};
+    int purge_inner_walls_affected_transition_count{0};
+
     void clear(){
         filament_flush_weight = 0;
         filament_change_count = 0;
         flush_filament_change_count = 0;
+        purge_inner_walls_requested_volume_mm3 = 0.f;
+        purge_inner_walls_existing_volume_mm3 = 0.f;
+        purge_inner_walls_extra_volume_mm3 = 0.f;
+        purge_inner_walls_reduced_volume_mm3 = 0.f;
+        purge_inner_walls_affected_layer_count = 0;
+        purge_inner_walls_affected_transition_count = 0;
     }
 
     FilamentChangeStats& operator+=(const FilamentChangeStats& other) {
         this->filament_flush_weight += other.filament_flush_weight;
         this->filament_change_count += other.filament_change_count;
         this->flush_filament_change_count += other.flush_filament_change_count;
+        this->purge_inner_walls_requested_volume_mm3 += other.purge_inner_walls_requested_volume_mm3;
+        this->purge_inner_walls_existing_volume_mm3 += other.purge_inner_walls_existing_volume_mm3;
+        this->purge_inner_walls_extra_volume_mm3 += other.purge_inner_walls_extra_volume_mm3;
+        this->purge_inner_walls_reduced_volume_mm3 += other.purge_inner_walls_reduced_volume_mm3;
+        this->purge_inner_walls_affected_layer_count += other.purge_inner_walls_affected_layer_count;
+        this->purge_inner_walls_affected_transition_count += other.purge_inner_walls_affected_transition_count;
         return *this;
     }
 
@@ -142,6 +164,12 @@ struct FilamentChangeStats
         ret.filament_flush_weight = this->filament_flush_weight + other.filament_flush_weight;
         ret.filament_change_count = this->filament_change_count + other.filament_change_count;
         ret.flush_filament_change_count = this->flush_filament_change_count + other.flush_filament_change_count;
+        ret.purge_inner_walls_requested_volume_mm3 = this->purge_inner_walls_requested_volume_mm3 + other.purge_inner_walls_requested_volume_mm3;
+        ret.purge_inner_walls_existing_volume_mm3 = this->purge_inner_walls_existing_volume_mm3 + other.purge_inner_walls_existing_volume_mm3;
+        ret.purge_inner_walls_extra_volume_mm3 = this->purge_inner_walls_extra_volume_mm3 + other.purge_inner_walls_extra_volume_mm3;
+        ret.purge_inner_walls_reduced_volume_mm3 = this->purge_inner_walls_reduced_volume_mm3 + other.purge_inner_walls_reduced_volume_mm3;
+        ret.purge_inner_walls_affected_layer_count = this->purge_inner_walls_affected_layer_count + other.purge_inner_walls_affected_layer_count;
+        ret.purge_inner_walls_affected_transition_count = this->purge_inner_walls_affected_transition_count + other.purge_inner_walls_affected_transition_count;
         return ret;
     }
 
@@ -261,6 +289,8 @@ private:
 
 class ToolOrdering
 {
+    friend class Print;
+
 public:
     enum FilamentChangeMode {
         SingleExt,

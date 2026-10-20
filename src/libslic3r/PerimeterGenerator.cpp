@@ -248,10 +248,18 @@ static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perime
             path.mm3_per_mm = extrusion_mm3_per_mm;
             path.width = extrusion_width;
             path.height     = (float)perimeter_generator.layer_height;
+            path.inset_idx = loop.depth;
             paths.emplace_back(std::move(path));
         }
 
-        coll.append(ExtrusionLoop(std::move(paths), loop_role));
+        // ORCA: Purge into inner walls - tag inner walls (non-external) as purge candidates
+        ExtrusionLoop loop_obj(std::move(paths), loop_role);
+        if (!is_external && perimeter_generator.print_config->purge_into_inner_walls.getBool()) {
+            loop_obj.is_purge_inner_wall_candidate = true;
+            loop_obj.generated_for_purge = false;
+            loop_obj.purge_candidate_priority = 1000 + loop.depth;
+        }
+        coll.append(std::move(loop_obj));
     }
 
     // Append thin walls to the nearest-neighbor search (only for first iteration)
@@ -559,9 +567,21 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
 
         // Append paths to collection.
         if (!paths.empty()) {
+            // Set inset_idx on all paths before creating the loop
+            for (ExtrusionPath& path : paths) {
+                path.inset_idx = extrusion->inset_idx;
+            }
+            
             if (extrusion->is_closed) {
                 ExtrusionLoop extrusion_loop(std::move(paths), pg_extrusion.is_contour ? elrDefault : elrHole);
-                extrusion_loop.inset_idx = extrusion->inset_idx;
+                
+                // ORCA: Purge into inner walls - tag inner walls (non-external) as purge candidates
+                if (extrusion->inset_idx > 0 && perimeter_generator.print_config->purge_into_inner_walls.getBool()) {
+                    extrusion_loop.is_purge_inner_wall_candidate = true;
+                    extrusion_loop.generated_for_purge = false;
+                    extrusion_loop.purge_candidate_priority = 1000 + extrusion->inset_idx;
+                }
+                
                 if ((perimeter_generator.config->wall_direction == WallDirection::CounterClockwise) ==
                     (pg_extrusion.is_contour || pg_extrusions.size() == 2))
                     extrusion_loop.make_counter_clockwise();
