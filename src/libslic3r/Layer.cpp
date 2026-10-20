@@ -27,7 +27,12 @@
 #include <cmath>
 #include <map>
 #include <numeric>
+#include <memory>
+#include <optional>
+#include <limits>
+#include <cmath>
 #include "Config.hpp"
+#include "GCode/PurgeIntoInnerWalls.hpp"
 #include "MultiMaterialSegmentation.hpp"
 #include "ObjectID.hpp"
 
@@ -382,6 +387,25 @@ static void remove_extrusions_over(ExtrusionEntityCollection &collection, const 
     collection.entities = std::move(kept);
 }
 
+std::vector<Layer::PurgeInnerWall> Layer::purge_inner_walls() const
+{
+    std::map<int, std::vector<const ExtrusionEntityCollection *>> by_outer_filament;
+    std::map<const ExtrusionEntityCollection *, const LayerRegion *> owners;
+    for (const LayerRegion *region : m_regions)
+        for (const ExtrusionEntity *entity : region->perimeters.entities)
+            if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity)) {
+                by_outer_filament[region->region().config().outer_wall_filament_id.value].push_back(collection);
+                owners.emplace(collection, region);
+            }
+    std::vector<PurgeInnerWall> result;
+    for (const auto &[filament, collections] : by_outer_filament)
+        for (auto &wall : ExtrusionEntityCollection::purge_inner_walls(collections)) {
+            const LayerRegion *region = owners.at(wall.collection);
+            result.push_back({region, std::move(wall)});
+        }
+    return result;
+}
+
 // Here the perimeters are created cummulatively for all layer regions sharing the same parameters influencing the perimeters.
 // The perimeter paths and the thin fills (ExtrusionEntityCollection) are assigned to the first compatible layer region.
 // The resulting fill surface is split back among the originating regions.
@@ -630,6 +654,138 @@ void Layer::simplify_support_loop(ExtrusionLoop* loop)
             loop->paths[i].simplify(scaled_resolution);
         }
     }
+}
+
+SupportLayer::PurgeRegion::PurgeRegion(ExtrusionEntityCollection &paths, ExPolygons areas, const Flow &flow)
+    : m_paths(&paths), m_areas(std::move(areas)), m_flow(flow)
+{
+}
+
+void SupportLayer::PurgeRegion::reset()
+{
+    if (m_original) {
+        // Transfer the saved native paths back; cloning would temporarily keep
+        // the grown paths and two copies of the original support alive.
+        m_paths->swap(*m_original);
+        m_original.reset();
+    }
+    m_grown_rings = 0;
+}
+
+double SupportLayer::PurgeRegion::grow(double additional_volume)
+{
+    if (additional_volume <= EPSILON || m_areas.empty() || m_flow.spacing() <= EPSILON)
+        return 0.;
+    return this->grow_impl(m_paths->total_volume() + additional_volume, 0);
+}
+
+double SupportLayer::PurgeRegion::grow_to_ring_count(size_t min_rings)
+{
+    if (min_rings <= m_grown_rings || m_areas.empty() || m_flow.spacing() <= EPSILON)
+        return 0.;
+    return this->grow_impl(std::numeric_limits<double>::infinity(), min_rings);
+}
+
+// The taper counts layers, not touching regions: every layer in between costs
+// a ring, including the ones a gap hides (a roof/interface layer without a
+// base fill, for example).
+size_t SupportLayer::required_rings(size_t own_rings, const BoundingBox &region_box, size_t layer_idx,
+                                    const std::vector<WallGrowth> &grown_above)
+{
+    size_t required = own_rings;
+    if (!region_box.defined)
+        return required;
+    for (const WallGrowth &upper : grown_above) {
+        if (upper.layer_idx <= layer_idx)
+            continue;
+        const size_t distance = upper.layer_idx - layer_idx;
+        if (!region_box.overlap(upper.box))
+            continue;
+        required = std::max(required, PurgeIntoInnerWalls::tapered_rings(upper.rings, distance));
+    }
+    return required;
+}
+
+// March inward one ring at a time until the region carries min_rings walls
+// and the volume reaches target_volume (+inf disables the demand stop).
+double SupportLayer::PurgeRegion::grow_impl(double target_volume, size_t min_rings)
+{
+    const double infinity = std::numeric_limits<double>::infinity();
+    const double original_volume = m_paths->total_volume();
+    // Printed filament reported to callers; the lift credit reaches only the
+    // acceptance baseline `accept_volume` (== `volume` on the demand path).
+    double volume = original_volume;
+    double accept_volume = original_volume;
+    const double spacing = m_flow.scaled_spacing();
+    ExPolygons loop_areas = offset_ex(m_areas, -0.5 * spacing);
+    ExtrusionEntityCollection walls;
+    std::optional<ExPolygons> expanded_areas;
+    size_t wall_count = 0;
+    // Lift path only (min_rings > 0, demand disabled): a native-wall redraw
+    // is volume-neutral and a narrow region may fit nothing else, so credit
+    // consumed redraws; the demand path compares printed filament only.
+    const auto consumed_loops_volume = [this](const ExPolygons &wall_band) {
+        double volume = 0.;
+        for_each_extrusion_leaf(m_original ? *m_original : *m_paths, [&](const ExtrusionEntity &entity) {
+            const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity);
+            if (loop == nullptr)
+                return;
+            const Polygon loop_poly = loop->polygon();
+            if (loop_poly.points.size() < 3)
+                return;
+            const double loop_area = std::abs(area(loop_poly));
+            double covered = 0.;
+            for (const ExPolygon &part : intersection_ex(wall_band, ExPolygons{ ExPolygon(loop_poly) }))
+                covered += area(part.contour);
+            if (covered >= 0.999 * loop_area)
+                volume += loop->total_volume();
+        });
+        return volume;
+    };
+    const auto done = [&]() {
+        const bool demand_satisfied = target_volume >= infinity || volume + EPSILON >= target_volume;
+        return demand_satisfied && m_grown_rings >= min_rings;
+    };
+    while (!loop_areas.empty() && !done()) {
+        ++wall_count;
+        extrusion_entities_append_loops(walls.entities, to_polygons(loop_areas), erSupportMaterial,
+                                        m_flow.mm3_per_mm(), m_flow.width(), m_flow.height());
+        // Replace the wall band, rather than superimposing walls on the
+        // existing infill. Preserve native fill (including its individual
+        // heights/flows) in the interior and outside this growth region.
+        const ExPolygons interior = offset_ex(loop_areas, -0.5 * spacing);
+        // This boundary is invariant; defer it until an extra wall is possible.
+        if (!expanded_areas)
+            expanded_areas = offset_ex(m_areas, SCALED_EPSILON);
+        const ExPolygons wall_band = diff_ex(*expanded_areas, interior);
+        ExtrusionEntityCollection candidate(walls);
+        candidate.no_sort = true; // support outlines before remaining fill
+        for_each_extrusion_path(m_original ? *m_original : *m_paths, [&](const ExtrusionPath &path) {
+            path.subtract_expolygons(wall_band, &candidate);
+        });
+        const double candidate_volume = candidate.total_volume();
+        double for_accept = candidate_volume;
+        if (min_rings > 0)
+            for_accept += consumed_loops_volume(wall_band);
+        // Dense first layers or narrow branches may already have as much
+        // capacity as these loops. Never reduce their existing capacity.
+        if (for_accept > accept_volume + EPSILON) {
+            // Save the native paths only on accepted growth, transferring
+            // ownership instead of deep-copying paths we are about to replace.
+            if (!m_original)
+                m_original = std::make_unique<ExtrusionEntityCollection>(std::move(*m_paths));
+            accept_volume = for_accept;
+            volume = candidate_volume;
+            m_paths->swap(candidate);
+            m_grown_rings = std::max(m_grown_rings, wall_count);
+        }
+        if (done())
+            break;
+        // Same shrink/open operation as native tree support walls: narrow
+        // remnants disappear instead of producing overlapping/overflowing loops.
+        loop_areas = offset2_ex(loop_areas, -1.4 * spacing, 0.4 * spacing);
+    }
+    return std::max(0., volume - original_volume);
 }
 
 // Export to "out/LayerRegion-name-%d.svg" with an increasing index with every export.

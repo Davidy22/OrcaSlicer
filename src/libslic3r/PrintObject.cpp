@@ -1,4 +1,5 @@
 #include "ExPolygon.hpp"
+#include "ExtrusionEntityCollection.hpp"
 #include "Config.hpp"
 #include "Exception.hpp"
 #include "Line.hpp"
@@ -14,6 +15,8 @@
 #include "ClipperUtils.hpp"
 #include "ConnectedBodies.hpp"
 #include "Geometry.hpp"
+#include "GCode/PurgeIntoInnerWalls.hpp"
+#include "GCode/ToolOrdering.hpp"
 #include "I18N.hpp"
 #include "Layer.hpp"
 #include "MutablePolygon.hpp"
@@ -186,6 +189,9 @@ PrintBase::ApplyStatus PrintObject::set_instances(PrintInstances &&instances)
         status = PrintBase::APPLY_STATUS_CHANGED;
         if (m_print->invalidate_steps({ psSkirtBrim, psGCodeExport }) ||
             (! equal_length && m_print->invalidate_step(psWipeTower)))
+            status = PrintBase::APPLY_STATUS_INVALIDATED;
+        // Purge-grown walls depend on the capacity of all physical copies.
+        if (!equal_length && m_print->config().purge_into_inner_walls && this->invalidate_step(posPerimeters))
             status = PrintBase::APPLY_STATUS_INVALIDATED;
         m_instances = std::move(instances);
 	    for (PrintInstance &i : m_instances)
@@ -544,12 +550,16 @@ void PrintObject::make_perimeters()
     m_print->set_status(15, L("Generating walls"));
     BOOST_LOG_TRIVIAL(info) << "Generating walls..." << log_memory_info();
 
+    // Restore native slices even if purge growth was interrupted before
+    // prepare_infill() typed them. Otherwise its extra wall counts survive
+    // a lower-demand replan or disabling purge.
     // Revert the typed slices into untyped slices, together with the anchors handed to bridges by a previous run.
     for (Layer *layer : m_layers) {
         layer->restore_untyped_slices();
         m_print->throw_if_canceled();
     }
     m_typed_slices = false;
+    m_purge_extra_perimeters = false;
     anchor_bridges_in_neighbours(m_layers, [this]() { m_print->throw_if_canceled(); });
 
     // compare each layer to the one below, and mark those slices needing
@@ -635,6 +645,206 @@ void PrintObject::make_perimeters()
     );
     m_print->throw_if_canceled();
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - end";
+
+    // ORCA: Purge into inner walls - grow extra inner wall loops layer by
+    // layer until the tagged inner walls can absorb this object's share of
+    // the layer's purge volume (or the object is solid there). Growth happens
+    // on objects marked "Prioritize purge into inner walls"; if no object is
+    // marked, every object grows loops, so the global toggle alone is enough
+    // to make the feature work. This runs after the regular perimeters above
+    // so the existing candidate volume is measured from real toolpaths;
+    // layers that need more loops are regenerated with bumped
+    // Surface::extra_perimeters (infill has not run yet, so regeneration is
+    // safe). The purge allocation itself happens later, in
+    // Print::_plan_purge_into_inner_walls().
+    const PrintConfig &purge_cfg = m_print->config();
+    if (purge_cfg.purge_into_inner_walls.getBool() && !purge_cfg.spiral_mode.getBool()
+        && purge_cfg.print_sequence != PrintSequence::ByObject && !m_layers.empty()) {
+        size_t num_instances = std::max<size_t>(this->instances().size(), 1);
+        for (const PrintObject *object : m_print->objects()) {
+            // Shared layers are generated only here, but printed by every
+            // recipient. Credit their copies before deciding to add walls.
+            if (object->get_shared_object() == this)
+                num_instances += std::max<size_t>(object->instances().size(), 1);
+        }
+        {
+            const float num_copies = float(num_instances);
+
+            // Filaments printing on a layer, in printing order, from the region
+            // filament assignments (1-based ids -> 0-based matrix indices, like
+            // LayerTools::wall_extruder_id()). ToolOrdering::collect_extruders
+            // cannot be used here: it reads generated toolpaths.
+            //
+            // Order matters because the flush matrix is directional and because
+            // a three-color layer is not necessarily printed in sorted order: a
+            // sorted set walks 0->1->2 while the printer may really go 0->2->1,
+            // so the expensive pair is never counted and the walls are sized for
+            // the wrong transitions. The unabsorbed volume then lands in support
+            // walls, which are grown afterwards from the exact toolordering
+            // demand - purge ends up in support even though the model still had
+            // room for more loops. Keep the colors in first-appearance order, one
+            // entry each, so the transition count matches the sorted walk but the
+            // pairs follow the real print order.
+            auto layer_filament_sequence = [](const Layer *layer) {
+                std::vector<unsigned int> filaments;
+                if (layer == nullptr)
+                    return filaments;
+                const auto add_filament = [&filaments](int filament_id) {
+                    if (filament_id <= 0)
+                        return;
+                    const auto filament = (unsigned int) (filament_id - 1);
+                    if (std::find(filaments.begin(), filaments.end(), filament) == filaments.end())
+                        filaments.emplace_back(filament);
+                };
+                for (const LayerRegion *layerm : layer->regions()) {
+                    if (layerm->slices.empty())
+                        continue;
+                    const PrintRegionConfig &rcfg = layerm->region().config();
+                    if (rcfg.is_infill_first.value) {
+                        add_filament(rcfg.sparse_infill_filament_id.value);
+                        add_filament(rcfg.internal_solid_filament_id.value);
+                    }
+                    add_filament(rcfg.outer_wall_filament_id.value);
+                    if (rcfg.wall_loops.value > 1)
+                        add_filament(rcfg.inner_wall_filament_id.value);
+                    if (!rcfg.is_infill_first.value) {
+                        add_filament(rcfg.sparse_infill_filament_id.value);
+                        add_filament(rcfg.internal_solid_filament_id.value);
+                    }
+                    add_filament(rcfg.top_surface_filament_id.value);
+                    add_filament(rcfg.bottom_surface_filament_id.value);
+                }
+                return filaments;
+            };
+
+            // This object's share of each layer's purge demand: the total
+            // demand of a layer is the sum of the flush volumes of its
+            // toolchanges (in print order, estimate only) and is split evenly
+            // between the objects printing that layer. Whatever is still
+            // missing at allocation time falls back to other objects' existing
+            // walls and then to proportional reduction (with a warning), so an
+            // over-estimate only costs extra walls.
+            std::vector<float> demand(m_layers.size(), 0.f);
+            {
+                const auto &objects = m_print->objects();
+                int prev_filament = -1;
+                for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx) {
+                    const coordf_t z = m_layers[layer_idx]->print_z;
+                    float layer_demand    = 0.f;
+                    int   preferred_count = 0;
+                    for (const PrintObject *object : objects) {
+                        const Layer *layer = object->get_layer_at_printz(z, EPSILON);
+                        if (layer == nullptr)
+                            continue;
+                        ++preferred_count;
+                        PurgeIntoInnerWalls::for_each_toolchange(layer_filament_sequence(layer), prev_filament,
+                            [&](unsigned int from, unsigned int to) {
+                                if (!WipingExtrusions::can_purge(purge_cfg, from, to))
+                                    return;
+                                // The flush matrix is directional and this
+                                // sequence only approximates the real toolpath
+                                // order, so size the walls for the more
+                                // expensive direction. Over-estimating costs
+                                // extra native walls; under-estimating would
+                                // hand the volume to support instead.
+                                const float volume = std::max(
+                                    estimate_flush_volume(purge_cfg, from, to),
+                                    estimate_flush_volume(purge_cfg, to, from));
+                                layer_demand += volume;
+                            });
+                    }
+                    if (preferred_count > 0)
+                        demand[layer_idx] = layer_demand / float(preferred_count);
+                }
+            }
+
+            std::vector<int>   extra_loops(m_layers.size(), 0), applied_loops(m_layers.size(), 0);
+            std::vector<float> measured(m_layers.size(), 0.f);
+            // Candidate purge volume of the layer, counting every copy: a shared
+            // layer is generated once but printed by each recipient.
+            auto measure_layer = [this, num_copies](size_t layer_idx) {
+                float volume = 0.f;
+                for (const auto &candidate : m_layers[layer_idx]->purge_inner_walls())
+                    volume += float(candidate.wall.collection->total_volume()) * num_copies;
+                return volume;
+            };
+            for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx)
+                measured[layer_idx] = measure_layer(layer_idx);
+
+            // Grow loops, propagate the wall counts downward, regenerate and
+            // re-measure. The offset projection is an estimate, so allow a
+            // few correction cycles, including one for a newly created native
+            // shell consuming the first projected loop. There is deliberately
+            // no configurable loop cap: growth stops when the purge volume
+            // fits or the layer is solid.
+            for (int cycle = 0; cycle < 4; ++cycle) {
+                bool changed = false;
+                for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx) {
+                    if (demand[layer_idx] <= 0.f || measured[layer_idx] >= demand[layer_idx])
+                        continue;
+                    // Projected extra candidate volume (all copies) after
+                    // 1, 2, ... more loops, merged over the layer's regions;
+                    // a region that turns solid keeps contributing its final
+                    // total to every later entry.
+                    const float      cap = (demand[layer_idx] - measured[layer_idx]) / num_copies;
+                    std::vector<float> cumulative;
+                    for (const LayerRegion *layerm : m_layers[layer_idx]->regions()) {
+                        std::vector<float> region_cumulative = layerm->purge_extra_loop_cumulative_volumes(applied_loops[layer_idx], cap);
+                        if (cumulative.size() < region_cumulative.size())
+                            cumulative.resize(region_cumulative.size(), cumulative.empty() ? 0.f : cumulative.back());
+                        for (size_t i = 0; i < region_cumulative.size(); ++i)
+                            cumulative[i] += region_cumulative[i] * num_copies;
+                        const float region_total = (region_cumulative.empty() ? 0.f : region_cumulative.back()) * num_copies;
+                        for (size_t i = region_cumulative.size(); i < cumulative.size(); ++i)
+                            cumulative[i] += region_total;
+                    }
+                    int add_loops = 0;
+                    while (add_loops < (int) cumulative.size() && measured[layer_idx] + cumulative[(size_t) add_loops] < demand[layer_idx])
+                        ++add_loops;
+                    if (add_loops < (int) cumulative.size())
+                        ++add_loops; // cumulative[i] holds the volume of i+1 loops
+                    // else: every projected loop to solid is needed.
+                    if (add_loops > 0) {
+                        extra_loops[layer_idx] += add_loops;
+                        changed = true;
+                    }
+                }
+                // Downward propagation: grown walls taper out one loop per
+                // layer, so a purge-driven spike in wall count neither prints
+                // into air nor runs the full height of the object. The rule is
+                // shared with the support wall growth, see
+                // PurgeIntoInnerWalls::tapered_rings().
+                for (size_t layer_idx = m_layers.size() - 1; layer_idx-- > 0;) {
+                    const int needed = PurgeIntoInnerWalls::tapered_rings(extra_loops[layer_idx + 1], 1);
+                    if (extra_loops[layer_idx] < needed) {
+                        extra_loops[layer_idx] = needed;
+                        changed = true;
+                    }
+                }
+                if (!changed)
+                    break;
+                // Set before workers can mutate slices or throw on cancellation.
+                m_purge_extra_perimeters = true;
+                tbb::parallel_for(
+                    tbb::blocked_range<size_t>(0, m_layers.size()),
+                    [this, &extra_loops, &applied_loops](const tbb::blocked_range<size_t> &range) {
+                        for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++layer_idx) {
+                            const int delta = extra_loops[layer_idx] - applied_loops[layer_idx];
+                            if (delta <= 0)
+                                continue;
+                            m_print->throw_if_canceled();
+                            for (LayerRegion *layerm : m_layers[layer_idx]->regions())
+                                layerm->apply_purge_extra_perimeters(delta);
+                            m_layers[layer_idx]->make_perimeters();
+                            applied_loops[layer_idx] = extra_loops[layer_idx];
+                        }
+                    });
+                m_print->throw_if_canceled();
+                for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx)
+                    measured[layer_idx] = measure_layer(layer_idx);
+            }
+        }
+    }
 
     this->set_done(posPerimeters);
 }
@@ -1486,6 +1696,12 @@ bool PrintObject::invalidate_state_by_config_options(
     std::vector<PrintObjectStep> steps;
     bool invalidated = false;
     for (const t_config_option_key &opt_key : opt_keys) {
+        // These colors also enter the pre-infill estimate used to grow purge walls.
+        if (m_print->config().purge_into_inner_walls &&
+            (opt_key == "sparse_infill_filament_id" || opt_key == "internal_solid_filament_id" ||
+             opt_key == "top_surface_filament_id" || opt_key == "bottom_surface_filament_id"))
+            steps.emplace_back(posPerimeters);
+
         if (   opt_key == "brim_width"
             || opt_key == "leading_brim_length"
             || opt_key == "extra_brim_width"
@@ -1901,6 +2117,16 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "belt_purge_tower_object") {
             invalidated |= m_print->invalidate_step(psWipeTower);
             invalidated |= m_print->invalidate_step(psGCodeExport);
+        } else if (opt_key == "purge_into_inner_walls_preferred") {
+            // Changing the preferred targets redistributes purge demand and
+            // may enable/disable the all-objects growth fallback, so regenerate
+            // every object's walls, not just the checkbox's owner.
+            for (PrintObject *object : m_print->objects())
+                if (object != this)
+                    invalidated |= object->invalidate_step(posPerimeters);
+            steps.emplace_back(posPerimeters);
+            invalidated |= m_print->invalidate_step(psWipeTower);
+            invalidated |= m_print->invalidate_step(psGCodeExport);
         } else {
             // for legacy, if we can't handle this option let's invalidate all steps
             this->invalidate_all_steps();
@@ -1916,7 +2142,10 @@ bool PrintObject::invalidate_state_by_config_options(
 
 bool PrintObject::invalidate_step(PrintObjectStep step)
 {
-	bool invalidated = Inherited::invalidate_step(step);
+    bool invalidated = false;
+    if (step == posSlice || step == posPerimeters)
+        invalidated = m_print->invalidate_purge_wall_demand();
+    invalidated |= Inherited::invalidate_step(step);
 
     // propagate to dependent steps
     if (step == posPerimeters) {
@@ -1961,10 +2190,11 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
 
 bool PrintObject::invalidate_all_steps()
 {
+    const bool purge_invalidated = m_print->invalidate_purge_wall_demand();
 	// First call the "invalidate" functions, which may cancel background processing.
     const bool inherited_invalidated = Inherited::invalidate_all_steps();
     const bool print_invalidated     = m_print->invalidate_all_steps();
-    bool result = inherited_invalidated || print_invalidated;
+    bool result = purge_invalidated || inherited_invalidated || print_invalidated;
 	// Then reset some of the depending values.
 	m_slicing_params.valid = false;
 	m_belt_floor_z_shift_cache_valid = false;

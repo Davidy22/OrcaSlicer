@@ -34,6 +34,7 @@ class PrintObject;
 class LayerTools;
 namespace CustomGCode { struct Item; }
 class PrintRegion;
+struct FilamentChangeStats;
 
 // Object of this class holds information about whether an extrusion is printed immediately
 // after a toolchange (as part of infill/perimeter wiping) or not. One extrusion can be a part
@@ -53,9 +54,20 @@ public:
     int get_support_extruder_overrides(const PrintObject* object);
     int get_support_interface_extruder_overrides(const PrintObject* object);
 
+    // Read-only, per-entity/per-copy routing (unclaimed/native returns -1).
+    int get_extruder_override(const ExtrusionEntity* entity, const PrintObject* object, size_t copy_id) const;
+    float purge_capacity(const Print& print, unsigned int initial_extruder) const;
+    static bool can_purge(const PrintConfig& config, unsigned int old_extruder, unsigned int new_extruder);
+    // Purge allocation order: objects marked "prioritize purge into inner
+    // walls" first, then the stable object order. Both the demand-driven
+    // support growth (Print::_plan_purge_into_inner_walls()) and the claim
+    // order here have to agree, so they share this comparator.
+    static bool purge_object_before(const PrintObject *a, const PrintObject *b);
+
     // This function goes through all infill entities, decides which ones will be used for wiping and
     // marks them by the extruder id. Returns volume that remains to be wiped on the wipe tower:
-    float mark_wiping_extrusions(const Print& print, unsigned int old_extruder, unsigned int new_extruder, float volume_to_wipe);
+    // stats: reference to FilamentChangeStats to update purge-into-inner-walls statistics
+    float mark_wiping_extrusions(const Print& print, unsigned int old_extruder, unsigned int new_extruder, float volume_to_wipe, FilamentChangeStats& stats);
 
     void ensure_perimeters_infills_order(const Print& print);
 
@@ -111,6 +123,16 @@ private:
     bool something_overridable = false;
     bool something_overridden = false;
     const LayerTools* m_layer_tools = nullptr;    // so we know which LayerTools object this belongs to
+
+    // ORCA: Purge into inner walls - per-layer proportional reduction state.
+    // m_purge_layer_scale (< 0 = not computed yet): fraction of each
+    // toolchange's requested purge volume that this layer's inner walls/supports can
+    // absorb in total, applied uniformly to all toolchanges on the layer.
+    // m_purge_shortfall_counted: this layer already contributed to the
+    // affected-layer statistics (counted once per layer, not per toolchange).
+    int   m_purge_initial_extruder = -1;
+    float m_purge_layer_scale = -1.f;
+    bool  m_purge_shortfall_counted = false;
 };
 
 
@@ -124,16 +146,24 @@ struct FilamentChangeStats
     int flush_filament_change_count{0};
     int filament_change_count{0};
 
+    // Purge shortfall counts displayed by the slicing warning
+    int purge_inner_walls_affected_layer_count{0};
+    int purge_inner_walls_affected_transition_count{0};
+
     void clear(){
         filament_flush_weight = 0;
         filament_change_count = 0;
         flush_filament_change_count = 0;
+        purge_inner_walls_affected_layer_count = 0;
+        purge_inner_walls_affected_transition_count = 0;
     }
 
     FilamentChangeStats& operator+=(const FilamentChangeStats& other) {
         this->filament_flush_weight += other.filament_flush_weight;
         this->filament_change_count += other.filament_change_count;
         this->flush_filament_change_count += other.flush_filament_change_count;
+        this->purge_inner_walls_affected_layer_count += other.purge_inner_walls_affected_layer_count;
+        this->purge_inner_walls_affected_transition_count += other.purge_inner_walls_affected_transition_count;
         return *this;
     }
 
@@ -142,6 +172,8 @@ struct FilamentChangeStats
         ret.filament_flush_weight = this->filament_flush_weight + other.filament_flush_weight;
         ret.filament_change_count = this->filament_change_count + other.filament_change_count;
         ret.flush_filament_change_count = this->flush_filament_change_count + other.flush_filament_change_count;
+        ret.purge_inner_walls_affected_layer_count = this->purge_inner_walls_affected_layer_count + other.purge_inner_walls_affected_layer_count;
+        ret.purge_inner_walls_affected_transition_count = this->purge_inner_walls_affected_transition_count + other.purge_inner_walls_affected_transition_count;
         return ret;
     }
 
@@ -260,6 +292,7 @@ public:
         m_wiping_extrusions.set_layer_tools_ptr(this);
         return m_wiping_extrusions;
     }
+    const WipingExtrusions& wiping_extrusions() const { return m_wiping_extrusions; }
 
 private:
     // This object holds list of extrusion that will be used for extruder wiping
@@ -268,6 +301,8 @@ private:
 
 class ToolOrdering
 {
+    friend class Print;
+
 public:
     enum FilamentChangeMode {
         SingleExt,
