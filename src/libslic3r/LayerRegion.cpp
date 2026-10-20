@@ -170,6 +170,100 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         g.process_arachne();
     else
         g.process_classic();
+
+    // Both wall generators bundle an island's outer and inner walls together.
+    // WipingExtrusions overrides whole collections, so give each wall its own
+    // collection before measuring capacity or assigning purge extruders.
+    if (print_config.purge_into_inner_walls && !print_config.spiral_mode && print_config.print_sequence != PrintSequence::ByObject)
+        this->perimeters.split_purge_inner_walls();
+
+    // ORCA: Purge into inner walls capacity planning is driven by
+    // PrintObject::make_perimeters(): it measures the purge candidate volume
+    // of the perimeters generated here and regenerates layers that need
+    // extra inner wall loops.
+}
+
+// ORCA: Purge into inner walls - take extra_loops more inner wall loops into
+// account on the next make_perimeters() run. The perimeter generator emits
+// wall_loops + Surface::extra_perimeters loops, so this just bumps the surfaces
+// that can carry inner walls (the same eligibility the candidate tagging uses).
+void LayerRegion::apply_purge_extra_perimeters(int extra_loops)
+{
+    if (extra_loops <= 0)
+        return;
+    // Need at least 1 wall loop: wall_loops=0 means no walls at all, so there
+    // are no inner walls to purge into.
+    if (region().config().wall_loops.value < 1)
+        return;
+    for (Surface& surface : this->slices.surfaces) {
+        if (surface.surface_type == stInternal || surface.is_external()) {
+            int new_value = int(surface.extra_perimeters) + extra_loops;
+            if (new_value > 10000)
+                new_value = 10000; // stay well inside the unsigned short storage
+            surface.extra_perimeters = (unsigned short)new_value;
+        }
+    }
+}
+
+// ORCA: Purge into inner walls - estimate how much candidate volume additional
+// inner wall loops would add, by marching the slice contours inward loop by
+// loop starting after the wall_loops + already_added_loops loops that exist
+// (or are already planned). Entry i is the cumulative volume of the first i+1
+// additional loops. Marching stops early once volume_cap is reached; without
+// a cap hit the vector ends where every surface of this region has turned
+// solid (offsets vanished). This only sizes the loop count - the generated
+// volume is re-measured from the generated walls after regeneration.
+std::vector<float> LayerRegion::purge_extra_loop_cumulative_volumes(int already_added_loops, float volume_cap) const
+{
+    std::vector<float> cumulative;
+    const int wall_loops = region().config().wall_loops.value;
+    if (wall_loops < 1)
+        return cumulative;
+    const Flow perimeter_flow = this->flow(frPerimeter);
+    const coord_t spacing = perimeter_flow.scaled_spacing();
+    const double mm3_per_mm = perimeter_flow.mm3_per_mm();
+    if (spacing <= 0 || mm3_per_mm <= 0.)
+        return cumulative;
+
+    // 0-based index of the first loop that does not exist yet. Loop k's
+    // centerline sits approximately (k + 0.5) spacings inward from the slice
+    // contour (external-perimeter width differences are ignored).
+    const int first_new_loop = wall_loops + (already_added_loops > 0 ? already_added_loops : 0);
+    std::vector<ExPolygons> currents;
+    for (const Surface& surface : this->slices.surfaces) {
+        if (!(surface.surface_type == stInternal || surface.is_external()))
+            continue;
+        ExPolygons current = offset_ex(surface.expolygon, -float((first_new_loop + 0.5) * double(spacing)));
+        if (!current.empty())
+            currents.emplace_back(std::move(current));
+    }
+
+    float running = 0.f;
+    // Advance all surfaces in lockstep, one loop at a time. The iteration cap
+    // only guards against pathological offsets that refuse to shrink; real
+    // surfaces turn solid far earlier.
+    for (int loop = 0; loop < 10000; ++loop) {
+        double loop_length = 0.;
+        for (const ExPolygons& current : currents) {
+            // Traverse existing contours without copying their point buffers.
+            // Keep the flattened order and per-surface sum unchanged.
+            double current_length = 0.;
+            for (const ExPolygon &expolygon : current)
+                for (size_t i = 0; i < expolygon.num_contours(); ++i)
+                    current_length += expolygon.contour_or_hole(i).length();
+            loop_length += current_length;
+        }
+        if (loop_length <= 0.)
+            break; // solid everywhere
+        running += float(unscale_(loop_length) * mm3_per_mm);
+        cumulative.push_back(running);
+        if (running >= volume_cap)
+            break;
+        for (ExPolygons& current : currents)
+            if (!current.empty())
+                current = offset_ex(current, -float(spacing));
+    }
+    return cumulative;
 }
 
 #if 1

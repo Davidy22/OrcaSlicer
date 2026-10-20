@@ -465,6 +465,10 @@ public:
     // infill is down. See defer_unsupported_loops() in PerimeterGenerator.cpp.
     bool print_after_infill = false;
 
+    // ORCA: Purge into inner walls - metadata for purge wall candidates
+    bool is_purge_inner_wall_candidate = false;
+    bool generated_for_purge = false;
+
     ExtrusionLoop(ExtrusionLoopRole role = elrDefault) : m_loop_role(role) {}
     ExtrusionLoop(const ExtrusionPaths &paths, ExtrusionLoopRole role = elrDefault) : paths(paths), m_loop_role(role) {}
     ExtrusionLoop(ExtrusionPaths &&paths, ExtrusionLoopRole role = elrDefault) : paths(std::move(paths)), m_loop_role(role) {}

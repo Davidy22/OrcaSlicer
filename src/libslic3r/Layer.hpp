@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <string>
 #include <functional>
+#include <memory>
 #include "ExPolygon.hpp"
 
 namespace Slic3r { class ExtrusionLoop; }
@@ -97,6 +98,16 @@ public:
     void    prepare_fill_surfaces();
     //BBS
     void    make_perimeters(const SurfaceCollection &slices, const LayerRegionPtrs &compatible_regions, SurfaceCollection* fill_surfaces, ExPolygons* fill_no_overlap);
+    // ORCA: Purge into inner walls - capacity planning helpers, driven by
+    // PrintObject::make_perimeters() once perimeters have been generated.
+    // Cumulative volume (mm3, single copy) that 1, 2, ... additional inner wall
+    // loops would add on top of the wall_loops + already_added_loops loops that
+    // exist (or are already planned); marching stops early once volume_cap is
+    // reached, and the vector ends where this region turns solid.
+    std::vector<float> purge_extra_loop_cumulative_volumes(int already_added_loops, float volume_cap) const;
+    // Add extra_loops to Surface::extra_perimeters of the surfaces that can
+    // carry inner walls, to take effect on the next make_perimeters() run.
+    void    apply_purge_extra_perimeters(int extra_loops);
     void    process_external_surfaces(const Layer *lower_layer, const Polygons *lower_layer_covered);
     double  infill_area_threshold() const;
     // Trim surfaces by trimming polygons. Used by the elephant foot compensation at the 1st layer.
@@ -205,6 +216,14 @@ public:
 
     // Whether two regions can be printed in a continues perimeter
     static bool             is_perimeter_compatible(const Print& print, const PrintRegion& a, const PrintRegion& b);
+    // A perimeter loop may be owned by a different compatible region from
+    // its neighboring loops after make_perimeters() merges/splits regions.
+    // Group native shells across those regions, but never across outer colors.
+    struct PurgeInnerWall {
+        const LayerRegion *region;
+        ExtrusionEntityCollection::PurgeInnerWall wall;
+    };
+    std::vector<PurgeInnerWall> purge_inner_walls() const;
     void                    make_perimeters();
     // Phony version of make_fills() without parameters for Perl integration only.
     void                    make_fills() { this->make_fills(nullptr); }
@@ -302,11 +321,30 @@ enum SupportInnerType {
 class SupportLayer : public Layer
 {
 public:
+    // Growth/replanning state for existing support-fill groups, shared by normal and tree supports.
+    class PurgeRegion
+    {
+    public:
+        PurgeRegion(ExtrusionEntityCollection &paths, ExPolygons areas, const Flow &flow, size_t base_wall_count);
+        void reset();
+        double grow(double additional_volume);
+        const ExtrusionEntityCollection *collection() const { return m_paths; }
+
+    private:
+        ExtrusionEntityCollection *m_paths;
+        ExPolygons m_areas;
+        Flow m_flow;
+        size_t m_base_wall_count;
+        std::unique_ptr<ExtrusionEntityCollection> m_original;
+    };
+
     // Polygons covered by the supports: base, interface and contact areas.
     // Used to suppress retraction if moving for a support extrusion over these support_islands.
     ExPolygons                  support_islands;
     // Extrusion paths for the support base and for the support interface and contacts.
     ExtrusionEntityCollection   support_fills;
+    // Runtime-only support wall growth, registered only in inner-wall purge mode.
+    std::vector<PurgeRegion> purge_support_regions;
     SupportInnerType            support_type = stInnerNormal;
 
     // for tree supports

@@ -702,6 +702,8 @@ private:
     // this is set to true when LayerRegion->slices is split in top/internal/bottom
     // so that next call to make_perimeters() performs a union() before computing loops
     bool                    				m_typed_slices = false;
+    // Purge growth edits untyped slices too, even when canceled before infill.
+    bool                                    m_purge_extra_perimeters = false;
 
     FillAdaptive::RegionOctrees             m_adaptive_fill_octrees;
     std::vector<BoundingBox>                m_separated_body_bboxes;
@@ -1463,6 +1465,11 @@ private:
     // Belt mode: route filament-change purging into the belt purge prism
     // (flush-into-objects) without generating a classic wipe tower.
     void                _plan_belt_purge();
+    // Purge into inner walls: route filament-change purging into tagged inner
+    // wall loops without generating a prime tower (has_wipe_tower() is false
+    // in this mode, so _make_wipe_tower() never runs). Mirrors _plan_belt_purge().
+    void                _plan_purge_into_inner_walls();
+    bool                invalidate_purge_wall_demand();
     // Belt mode: shift the purge prism's layer grid to match the printed
     // objects' grid so toolchange layers find prism layers to purge into.
     void                _align_belt_purge_layers();
@@ -1500,6 +1507,8 @@ private:
     PrintObjectPtrs                         m_objects;
     PrintRegionPtrs                         m_print_regions;
     bool                                    m_same_shrinkage_compensations { false };
+    // Object geometry invalidation feeds the cross-object purge refresh in apply().
+    bool                                    m_purge_perimeters_invalidated { false };
     Vec3d                                   m_shrinkage_compensation { Vec3d::Ones() };
     
     //SoftFever

@@ -8167,6 +8167,35 @@ void PrintConfigDef::init_fff_params()
     def->mode    = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    // Global purge-into-inner-walls options - replaces the prime tower
+    def = this->add("purge_into_inner_walls", coBool);
+    def->label = L("Purge into inner walls");
+    def->tooltip = L("Purge material after filament changes into inner wall loops instead of using a prime tower. "
+        "Enabling this option turns off the prime tower. "
+        "Existing inner walls are used first. Extra walls are generated inward from the innermost wall only if needed. "
+        "Model outer walls are never used for purging. Objects marked with the per-object 'Prioritize for purge into inner walls' option "
+        "are filled first and receive the extra wall loops. If no object is prioritized, all objects can receive extra loops. "
+        "If model inner walls cannot absorb the full purge volume, support walls and fill are used next, including outer support walls. "
+        "Support wall loops are increased only for the remaining demand, until it fits or the support is solid. "
+        "If the available volume is still insufficient, purge volume is reduced and color bleeding may occur. "
+        "Soluble and dedicated support filaments are not used for purging.");
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // No cap option for the extra loops: they are grown automatically until the
+    // layer's purge volume fits (or the object is solid there).
+
+    // Per-object prioritization toggle for purge_into_inner_walls (see PrintObjectConfig)
+    def = this->add("purge_into_inner_walls_preferred", coBool);
+    def->category = L("Flush options");
+    def->label = L("Prioritize for purge into inner walls");
+    def->tooltip = L("Prioritize this object as a target for purging into inner walls after filament changes: "
+        "its inner walls are filled before other objects' and it receives extra inner wall loops for purge capacity. "
+        "If no object is prioritized, all objects receive extra inner wall loops. "
+        "It will not take effect unless 'Purge into inner walls' is enabled.");
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("flush_volumes_vector", coFloats);
     // BBS: remove _L()
     def->label = ("Purging volumes - load/unload volumes");
@@ -10455,6 +10484,18 @@ t_config_option_keys DynamicPrintConfig::normalize_fdm_2(int num_objects, int us
             //    //alh_opt->value = false;
             //}
         }
+        
+        // ORCA: Mutual exclusivity between purge_into_inner_walls and enable_prime_tower
+        // purge_into_inner_walls replaces the prime tower
+        ConfigOptionBool* purge_opt = this->option<ConfigOptionBool>("purge_into_inner_walls");
+        if (purge_opt != nullptr && ept_opt != nullptr) {
+            if (purge_opt->value && ept_opt->value) {
+                // Both enabled - disable prime tower (purge mode takes precedence)
+                ept_opt->value = false;
+                changed_keys.push_back("enable_prime_tower");
+            }
+        }
+        
         /* BBS：MusangKing - use "global->support->Independent support layer height" widget to replace previous assignment
         else {
             if (islh_opt) {

@@ -42,6 +42,7 @@
 #include <map>
 #include <unordered_map>
 #include <optional>
+#include <random>
 #include <set>
 #include <string>
 #include <cfloat>
@@ -587,6 +588,9 @@ protected:
         const ExtrusionEntityCollection  *support;
         // erSupportMaterial / erSupportMaterialInterface / erSupportTransition or erMixed.
         ExtrusionRole                     support_extrusion_role;
+        // Native body/interface filaments when support leaves are split among
+        // purge changes/copies. Empty preserves the legacy whole-role route.
+        std::optional<std::pair<unsigned int, unsigned int>> support_purge_extruders;
 
         struct Island
         {
@@ -642,9 +646,13 @@ protected:
 		// For sequential print, the instance of the object to be printing has to be defined.
 		const size_t                     				 single_object_instance_idx);
 
-    std::string     extrude_perimeters(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool is_first_layer, bool is_infill_first, bool unsupported_loops_only = false);
+    std::string     extrude_perimeters(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region,
+                                      bool is_first_layer, bool is_infill_first, bool unsupported_loops_only = false,
+                                      bool purge_walls = false);
     std::string     extrude_infill(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool ironing);
     std::string     extrude_support(const ExtrusionEntityCollection& support_fills, const ExtrusionRole support_extrusion_role);
+    std::string     extrude_purge_support(const ObjectByExtruder& support, const WipingExtrusions& wiping,
+                                          const PrintObject& object, size_t copy_id, unsigned int extruder_id, bool purge_pass);
 
     // Farthest-point timelapse: find the extrusion point farthest from camera (0,0)
     void compute_farthest_point(const std::vector<LayerToPrint> &layers, int most_used_extruder,
@@ -756,6 +764,10 @@ protected:
 
     OozePrevention                      m_ooze_prevention;
     Wipe                                m_wipe;
+    // Active only while emitting overridden model walls in the purge pass.
+    bool                                m_purge_wall = false;
+    size_t                              m_purge_wall_index = 0;
+    std::minstd_rand                     m_purge_seam_rng;
     AvoidCrossingPerimeters             m_avoid_crossing_perimeters;
     RetractWhenCrossingPerimeters       m_retract_when_crossing_perimeters;
     TimelapsePosPicker                  m_timelapse_pos_picker;

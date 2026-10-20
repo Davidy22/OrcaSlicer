@@ -4,6 +4,7 @@
 #include "Point.hpp"
 #include "ExPolygon.hpp"
 #include "ExtrusionEntity.hpp"
+#include "ExtrusionEntityCollection.hpp"
 #include "Exception.hpp"
 #include "Flow.hpp"
 #include "Print.hpp"
@@ -22,6 +23,8 @@
 #include <utility>
 #include <cassert>
 #include <map>
+#include <memory>
+#include <optional>
 #include "Config.hpp"
 #include "MultiMaterialSegmentation.hpp"
 #include "ObjectID.hpp"
@@ -197,6 +200,25 @@ bool Layer::is_perimeter_compatible(const Print& print, const PrintRegion& a, co
         && config.seam_slope_min_length   == other_config.seam_slope_min_length
         && config.seam_slope_steps        == other_config.seam_slope_steps
         && config.seam_slope_inner_walls  == other_config.seam_slope_inner_walls;
+}
+
+std::vector<Layer::PurgeInnerWall> Layer::purge_inner_walls() const
+{
+    std::map<int, std::vector<const ExtrusionEntityCollection *>> by_outer_filament;
+    std::map<const ExtrusionEntityCollection *, const LayerRegion *> owners;
+    for (const LayerRegion *region : m_regions)
+        for (const ExtrusionEntity *entity : region->perimeters.entities)
+            if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity)) {
+                by_outer_filament[region->region().config().outer_wall_filament_id.value].push_back(collection);
+                owners.emplace(collection, region);
+            }
+    std::vector<PurgeInnerWall> result;
+    for (const auto &[filament, collections] : by_outer_filament)
+        for (auto &wall : ExtrusionEntityCollection::purge_inner_walls(collections)) {
+            const LayerRegion *region = owners.at(wall.collection);
+            result.push_back({region, std::move(wall)});
+        }
+    return result;
 }
 
 // Here the perimeters are created cummulatively for all layer regions sharing the same parameters influencing the perimeters.
@@ -423,6 +445,73 @@ void Layer::simplify_support_loop(ExtrusionLoop* loop)
             loop->paths[i].simplify(scaled_resolution);
         }
     }
+}
+
+SupportLayer::PurgeRegion::PurgeRegion(ExtrusionEntityCollection &paths, ExPolygons areas, const Flow &flow, size_t base_wall_count)
+    : m_paths(&paths), m_areas(std::move(areas)), m_flow(flow),
+      m_base_wall_count(base_wall_count)
+{
+}
+
+void SupportLayer::PurgeRegion::reset()
+{
+    if (m_original) {
+        // Transfer the saved native paths back; cloning would temporarily keep
+        // the grown paths and two copies of the original support alive.
+        m_paths->swap(*m_original);
+        m_original.reset();
+    }
+}
+
+double SupportLayer::PurgeRegion::grow(double additional_volume)
+{
+    if (additional_volume <= EPSILON || m_areas.empty() || m_flow.spacing() <= EPSILON)
+        return 0.;
+    const double original_volume = m_paths->total_volume();
+    const double target_volume = original_volume + additional_volume;
+    double volume = original_volume;
+    const double spacing = m_flow.scaled_spacing();
+    ExPolygons loop_areas = offset_ex(m_areas, -0.5 * spacing);
+    ExtrusionEntityCollection walls;
+    std::optional<ExPolygons> expanded_areas;
+    size_t wall_count = 0;
+    while (!loop_areas.empty() && volume + EPSILON < target_volume) {
+        ++wall_count;
+        extrusion_entities_append_loops(walls.entities, to_polygons(loop_areas), erSupportMaterial,
+                                        m_flow.mm3_per_mm(), m_flow.width(), m_flow.height());
+        if (wall_count > m_base_wall_count) {
+            // Replace the wall band, rather than superimposing walls on the
+            // existing infill. Preserve native fill (including its individual
+            // heights/flows) in the interior and outside this growth region.
+            const ExPolygons interior = offset_ex(loop_areas, -0.5 * spacing);
+            // This boundary is invariant; defer it until an extra wall is possible.
+            if (!expanded_areas)
+                expanded_areas = offset_ex(m_areas, SCALED_EPSILON);
+            const ExPolygons wall_band = diff_ex(*expanded_areas, interior);
+            ExtrusionEntityCollection candidate(walls);
+            candidate.no_sort = true; // support outlines before remaining fill
+            for_each_extrusion_path(m_original ? *m_original : *m_paths, [&](const ExtrusionPath &path) {
+                path.subtract_expolygons(wall_band, &candidate);
+            });
+            const double candidate_volume = candidate.total_volume();
+            // Dense first layers or narrow branches may already have as much
+            // capacity as these loops. Never reduce their existing capacity.
+            if (candidate_volume > volume + EPSILON) {
+                // Save the native paths only on accepted growth, transferring
+                // ownership instead of deep-copying paths we are about to replace.
+                if (!m_original)
+                    m_original = std::make_unique<ExtrusionEntityCollection>(std::move(*m_paths));
+                volume = candidate_volume;
+                m_paths->swap(candidate);
+            }
+        }
+        if (volume + EPSILON >= target_volume)
+            break; // No next ring is needed once the request is satisfied.
+        // Same shrink/open operation as native tree support walls: narrow
+        // remnants disappear instead of producing overlapping/overflowing loops.
+        loop_areas = offset2_ex(loop_areas, -1.4 * spacing, 0.4 * spacing);
+    }
+    return std::max(0., volume - original_volume);
 }
 
 // Export to "out/LayerRegion-name-%d.svg" with an increasing index with every export.

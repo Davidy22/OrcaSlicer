@@ -156,7 +156,9 @@ public:
   // change the Print: the caller issues the warning where a print step is active (G-code export).
   const std::string &precise_seam_warning() const { return m_precise_seam_warning; }
 
-  void place_seam(const Layer *layer, ExtrusionLoop &loop, const Point &last_pos, float& overhang) const;
+  // An override affects only this loop, never the cached exterior seam.
+  void place_seam(const Layer *layer, ExtrusionLoop &loop, const Point &last_pos, float& overhang,
+                  const std::optional<Point> &seam_override = std::nullopt) const;
 private:
   std::string m_precise_seam_warning;
 

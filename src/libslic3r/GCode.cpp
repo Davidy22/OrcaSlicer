@@ -6,6 +6,7 @@
 #include "Flow.hpp"
 #include "GCode/ThumbnailData.hpp"
 #include "GCode/ToolOrdering.hpp"
+#include "GCode/PurgeIntoInnerWalls.hpp"
 #include "GCode/SpiralVase.hpp"
 #include "GCode/PressureEqualizer.hpp"
 #include "GCode/SmallAreaInfillFlowCompensator.hpp"
@@ -81,6 +82,7 @@
 #include <stdexcept>
 #include <set>
 #include <optional>
+#include <random>
 #include <stdlib.h>
 #include <string>
 #include <system_error>
@@ -3329,6 +3331,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
 
     m_fan_mover.reset();
     m_ordering_cache.clear();
+    // A repeatable, independent sequence across layers, copies and toolchanges.
+    // Never restart it per layer/tool: identical loops would stack their seams.
+    m_purge_seam_rng.seed();
 
     // Belt printer: initialize belt-specific writer via virtual hook.
     this->init_belt_writer(print);
@@ -6946,14 +6951,39 @@ LayerResult GCode::process_layer(
                     support_filaments[{ &support_layer, erSupportMaterialInterface }] =
                         single_extruder ? (has_support ? support_extruder : interface_extruder) : interface_extruder;
                 }
-                // Assign an extruder to the base.
-                ObjectByExtruder &obj = object_by_extruder(by_extruder, has_support ? support_extruder : interface_extruder, &layer_to_print - layers.data(), layers.size());
-                obj.support = &support_layer.support_fills;
-                obj.support_extrusion_role = single_extruder ? erMixed : erSupportMaterial;
-                if (! single_extruder && has_interface) {
-                    ObjectByExtruder &obj_interface = object_by_extruder(by_extruder, interface_extruder, &layer_to_print - layers.data(), layers.size());
-                    obj_interface.support = &support_layer.support_fills;
-                    obj_interface.support_extrusion_role = erSupportMaterialInterface;
+                std::set<unsigned int> purge_support_tools;
+                if (print.config().purge_into_inner_walls)
+                    for_each_extrusion_leaf(support_layer.support_fills, [&](const ExtrusionEntity &entity) {
+                        for (size_t copy = 0; copy < object.instances().size(); ++copy) {
+                            const int tool = wiping_extrusions.get_extruder_override(&entity, &object, copy);
+                            if (tool >= 0)
+                                purge_support_tools.insert(unsigned(tool));
+                        }
+                    });
+                if (!purge_support_tools.empty()) {
+                    // Keep native tools too: unclaimed paths and protected
+                    // interfaces must still print, once, on every copy.
+                    const unsigned int body_tool = has_support ? support_extruder : interface_extruder;
+                    const unsigned int interface_tool = has_interface ? interface_extruder : body_tool;
+                    purge_support_tools.insert(body_tool);
+                    if (has_interface)
+                        purge_support_tools.insert(interface_tool);
+                    for (const unsigned int tool : purge_support_tools) {
+                        ObjectByExtruder &group = object_by_extruder(by_extruder, tool, &layer_to_print - layers.data(), layers.size());
+                        group.support = &support_layer.support_fills;
+                        group.support_extrusion_role = erMixed;
+                        group.support_purge_extruders = std::make_pair(body_tool, interface_tool);
+                    }
+                } else {
+                    // Assign an extruder to the base.
+                    ObjectByExtruder &obj = object_by_extruder(by_extruder, has_support ? support_extruder : interface_extruder, &layer_to_print - layers.data(), layers.size());
+                    obj.support = &support_layer.support_fills;
+                    obj.support_extrusion_role = single_extruder ? erMixed : erSupportMaterial;
+                    if (! single_extruder && has_interface) {
+                        ObjectByExtruder &obj_interface = object_by_extruder(by_extruder, interface_extruder, &layer_to_print - layers.data(), layers.size());
+                        obj_interface.support = &support_layer.support_fills;
+                        obj_interface.support_extrusion_role = erSupportMaterialInterface;
+                    }
                 }
             }
         }
@@ -7440,6 +7470,10 @@ LayerResult GCode::process_layer(
         // We are almost ready to print. However, we must go through all the objects twice to print the overridden extrusions first (infill/perimeter wiping feature):
         std::vector<ObjectByExtruder::Island::Region> by_region_per_copy_cache;
         for (int print_wipe_extrusions = is_anything_overridden; print_wipe_extrusions>=0; --print_wipe_extrusions) {
+            // Restart the slow purge ramp for this toolchange, not for each
+            // region, object, copy, or deferred-perimeter pass.
+            if (print_wipe_extrusions != 0)
+                m_purge_wall_index = 0;
             if (is_anything_overridden && print_wipe_extrusions == 0)
                 gcode+="; PURGING FINISHED\n";
 
@@ -7535,7 +7569,10 @@ LayerResult GCode::process_layer(
 
                     ExtrusionRole support_extrusion_role = instance_to_print.object_by_extruder.support_extrusion_role;
                     bool is_overridden = support_extrusion_role == erSupportMaterialInterface ? support_intf_overridden : support_overridden;
-                    if (is_overridden == (print_wipe_extrusions != 0)) {
+                    if (instance_to_print.object_by_extruder.support_purge_extruders) {
+                        gcode += this->extrude_purge_support(instance_to_print.object_by_extruder, wiping_extrusions,
+                            *layer_to_print.original_object, instance_to_print.instance_id, extruder_id, print_wipe_extrusions != 0);
+                    } else if (is_overridden == (print_wipe_extrusions != 0)) {
                         gcode += this->extrude_support(
                             // support_extrusion_role is erSupportMaterial, erSupportTransition, erSupportMaterialInterface or erMixed for all extrusion paths.
                             *instance_to_print.object_by_extruder.support, support_extrusion_role);
@@ -7610,8 +7647,9 @@ LayerResult GCode::process_layer(
                         return false;
                     };
                     {
+                        const bool purge_walls = print.config().purge_into_inner_walls && print_wipe_extrusions != 0;
                         // Print perimeters of regions that has is_infill_first == false
-                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false);
+                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false, false, purge_walls);
                         if (!has_wipe_tower && need_insert_timelapse_gcode_for_traditional && printer_structure == PrinterStructure::psI3
                             && !has_insert_timelapse_gcode && has_infill(by_region_specific)) {
                             gcode += this->retract(false, false, auto_lift_type, true);
@@ -7622,9 +7660,9 @@ LayerResult GCode::process_layer(
                         // Then print infill
                         gcode += this->extrude_infill(print, by_region_specific, false);
                         // Then the walls left hanging in mid air, now that the infill can anchor them
-                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false, true);
+                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false, true, purge_walls);
                         // Then print perimeters of regions that has is_infill_first == true
-                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, true);
+                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, true, false, purge_walls);
                     }
                     // ironing
                     gcode += this->extrude_infill(print,by_region_specific, true);
@@ -7934,11 +7972,16 @@ LayerResult GCode::process_layer(
                         m_nominal_z = obj_sub_z;
                         m_need_change_layer_lift_z = true;
                     }
-                    ExtrusionRole support_role = instance_to_print.object_by_extruder.support_extrusion_role;
-                    gcode += this->extrude_support(*instance_to_print.object_by_extruder.support, support_role);
-                    // Make sure ironing is the last (Orca names this role erIroning, not erSupportIroning).
-                    if (support_role == erMixed || support_role == erSupportMaterialInterface)
-                        gcode += this->extrude_support(*instance_to_print.object_by_extruder.support, erIroning);
+                    if (instance_to_print.object_by_extruder.support_purge_extruders) {
+                        gcode += this->extrude_purge_support(instance_to_print.object_by_extruder, layer_tools.wiping_extrusions(),
+                            *layers[instance_to_print.layer_id].original_object, instance_to_print.instance_id, extruder_id, false);
+                    } else {
+                        ExtrusionRole support_role = instance_to_print.object_by_extruder.support_extrusion_role;
+                        gcode += this->extrude_support(*instance_to_print.object_by_extruder.support, support_role);
+                        // Make sure ironing is the last (Orca names this role erIroning, not erSupportIroning).
+                        if (support_role == erMixed || support_role == erSupportMaterialInterface)
+                            gcode += this->extrude_support(*instance_to_print.object_by_extruder.support, erIroning);
+                    }
                 }
 
                 // --- Shared instance footer (mirrors Orca's main instance loop) ---
@@ -8353,7 +8396,24 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
     float seam_overhang = std::numeric_limits<float>::lowest();
     if (!m_config.spiral_mode && description == "perimeter") {
         assert(m_layer != nullptr);
-        m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang);
+        std::optional<Point> seam_override;
+        if (m_purge_wall && is_perimeter(loop.role()) && !is_external_perimeter(loop.role())) {
+            const Polygon polygon = loop.polygon();
+            std::vector<bool> preferred_edges;
+            // With no overhangs the entire loop is eligible: leave the mask
+            // empty instead of allocating and filling one bit per edge.
+            if (std::any_of(loop.paths.begin(), loop.paths.end(), [](const ExtrusionPath &path) { return is_bridge(path.role()); })) {
+                preferred_edges.reserve(polygon.points.size());
+                // Sample supported spans directly, not overhangs projected onto
+                // the same few supported endpoints.
+                for (const ExtrusionPath &path : loop.paths)
+                    if (path.polyline.points.size() > 1)
+                        preferred_edges.insert(preferred_edges.end(), path.polyline.points.size() - 1, !is_bridge(path.role()));
+            }
+            seam_override = PurgeIntoInnerWalls::seam_point(polygon.points,
+                std::generate_canonical<double, std::numeric_limits<double>::digits>(m_purge_seam_rng), preferred_edges);
+        }
+        m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang, seam_override);
     } else
         loop.split_at(last_pos, false);
 
@@ -8723,8 +8783,12 @@ std::string GCode::extrude_path(const ExtrusionPath& path, const std::string& de
 }
 
 // Extrude perimeters: Decide where to put seams (hide or align seams).
-std::string GCode::extrude_perimeters(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region, bool is_first_layer, bool is_infill_first, bool unsupported_loops_only)
+std::string GCode::extrude_perimeters(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region,
+                                     bool is_first_layer, bool is_infill_first, bool unsupported_loops_only, bool purge_walls)
 {
+    const bool previous_purge_wall = m_purge_wall;
+    m_purge_wall = purge_walls;
+    ScopeGuard restore_purge_wall([this, previous_purge_wall] { m_purge_wall = previous_purge_wall; });
     std::string gcode;
     for (const ObjectByExtruder::Island::Region &region : by_region)
         if (! region.perimeters.empty()) {
@@ -8762,6 +8826,8 @@ std::string GCode::extrude_perimeters(const Print &print, const std::vector<Obje
                     continue;
                 gcode += this->extrude_entity(*ee, "perimeter", -1., region.perimeters,
                                              wipe_support ? &*wipe_support : nullptr);
+                if (purge_walls)
+                    ++m_purge_wall_index;
                 if (wipe_support)
                     wipe_support->append(*ee);
             }
@@ -8804,6 +8870,47 @@ std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectBy
                 }
             }
         }
+    return gcode;
+}
+
+std::string GCode::extrude_purge_support(const ObjectByExtruder &support, const WipingExtrusions &wiping,
+                                       const PrintObject &object, size_t copy_id, unsigned int extruder_id, bool purge_pass)
+{
+    const auto [body_tool, interface_tool] = *support.support_purge_extruders;
+    // Select using ORIGINAL leaf identities before chaining. Chaining may clone
+    // reversed paths/collections, which no longer have keys in the override map.
+    // Preserve no_sort groups so support outline/fill order is not flattened.
+    const auto select = [&](auto &&self, const ExtrusionEntityCollection &source, bool ironing_only) -> ExtrusionEntityCollection {
+        ExtrusionEntityCollection selected;
+        selected.no_sort = source.no_sort;
+        if (!source.can_reverse())
+            selected.set_reverse();
+        for (const ExtrusionEntity *entity : source.entities) {
+            if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity)) {
+                ExtrusionEntityCollection child = self(self, *collection, ironing_only);
+                if (!child.empty())
+                    selected.append(std::move(child));
+            } else {
+                if ((entity->role() == erIroning) != ironing_only)
+                    continue;
+                const int override = wiping.get_extruder_override(entity, &object, copy_id);
+                const bool is_interface = entity->role() == erSupportMaterialInterface || entity->role() == erIroning;
+                const unsigned int tool = override >= 0 ? unsigned(override) : (is_interface ? interface_tool : body_tool);
+                if (tool == extruder_id && (override >= 0) == purge_pass)
+                    selected.append(*entity);
+            }
+        }
+        return selected;
+    };
+    ExtrusionEntityCollection selected = select(select, *support.support, false);
+    std::string gcode = this->extrude_support(selected, erMixed);
+    if (!purge_pass) {
+        // Partition first: a mixed-role parent must not hide nested ironing
+        // from extrude_support's role-specific finishing pass.
+        selected.clear();
+        const ExtrusionEntityCollection ironing = select(select, *support.support, true);
+        gcode += this->extrude_support(ironing, erIroning);
+    }
     return gcode;
 }
 
@@ -8853,7 +8960,7 @@ std::string GCode::extrude_support(const ExtrusionEntityCollection &support_fill
 
         for (const ExtrusionEntity *ee : extrusions) {
             ExtrusionRole role = ee->role();
-            assert(is_support(role) || role == erIroning);
+            assert(ee->is_collection() || is_support(role) || role == erIroning);
 
             const char* label = (role == erSupportMaterial) ? support_label :
                 ((role == erSupportMaterialInterface) ? support_interface_label : 
@@ -9374,6 +9481,23 @@ std::string GCode::_extrude(const ExtrusionPath &path, const std::string &path_d
     }
 }
     
+    // Purge overrides can use the native filament too, so tool mismatch is
+    // not a reliable test. The emission pass scopes this flag to claimed inner
+    // walls only; support, infill, exterior and unclaimed walls stay unchanged.
+    if (m_purge_wall && is_perimeter(path.role()) && !is_external_perimeter(path.role())) {
+        double target_speed = m_config.wipe_tower_max_purge_speed.value;
+        const double infill_speed = NOZZLE_CONFIG(sparse_infill_speed);
+        if (infill_speed > 0.)
+            target_speed = std::min(target_speed, infill_speed);
+        if (path_on_first_layer || object_layer_over_raft()) {
+            const double first_layer_speed = NOZZLE_CONFIG(initial_layer_speed);
+            if (first_layer_speed > 0.)
+                target_speed = std::min(target_speed, first_layer_speed);
+        }
+        speed = PurgeIntoInnerWalls::limit_speed(speed, target_speed, m_purge_wall_index,
+                                                FILAMENT_CONFIG(filament_flush_volumetric_speed), _mm3_per_mm);
+    }
+
     bool requires_segmented_extrusion = false;
     // A uniform fan state can be represented by the normal path-wide marker. Only a
     // transition within the path requires point-by-point emission.

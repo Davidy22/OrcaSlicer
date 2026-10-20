@@ -2155,6 +2155,8 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
             if (dlg.ShowModal() == wxID_YES) {
                 DynamicPrintConfig new_conf = *m_config;
                 new_conf.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
+                // This accepted tower choice must survive the reload's preset-conflict rule.
+                new_conf.set_key_value("purge_into_inner_walls", new ConfigOptionBool(false));
                 m_config_manipulation.apply(m_config, &new_conf);
                 wxGetApp().plater()->update();
             }
@@ -2435,6 +2437,9 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         // And call of the update() can causes a redundant check of the config values,
         return;
     }
+
+    if (is_fff && (opt_key == "purge_into_inner_walls" || opt_key == "enable_prime_tower"))
+        m_config_manipulation.update_purge_options(m_config, opt_key);
 
     update();
     if(m_active_page)
@@ -3194,6 +3199,8 @@ void TabPrint::build()
         optgroup->append_single_option_line("preheat_steps", "multimaterial_settings_ooze_prevention#preheat-steps");
 
         optgroup = page->new_optgroup(L("Flush options"), L"param_flush");
+        optgroup->append_single_option_line("purge_into_inner_walls", "multimaterial_settings_purge_options#purge-into-inner-walls");
+        optgroup->append_single_option_line("purge_into_inner_walls_preferred", "multimaterial_settings_purge_options#purge-into-inner-walls");
         optgroup->append_single_option_line("flush_into_infill", "multimaterial_settings_flush_options#flush-into-objects-infill");
         optgroup->append_single_option_line("flush_into_objects", "multimaterial_settings_flush_options#flush-into-this-object");
         optgroup->append_single_option_line("flush_into_support", "multimaterial_settings_flush_options#flush-into-objects-support");

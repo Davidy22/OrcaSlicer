@@ -894,6 +894,7 @@ void PrintObject::slice()
     this->update_layer_height_profile(*this->model_object(), m_slicing_params, layer_height_profile);
     m_print->throw_if_canceled();
     m_typed_slices = false;
+    m_purge_extra_perimeters = false;
     // The belt state below is only written while belt mode is on (and the min-Z
     // lift only when there is a rotation or remap). Start every slice from zero,
     // or a project switched from a belt printer to a normal one, or whose tilt
