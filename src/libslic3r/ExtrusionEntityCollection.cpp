@@ -8,6 +8,9 @@
 #include <cstddef>
 #include <limits>
 #include <map>
+#include <memory>
+#include <utility>
+#include <vector>
 
 namespace Slic3r {
 
@@ -154,8 +157,144 @@ double ExtrusionEntityCollection::min_mm3_per_mm() const
 {
     double min_mm3_per_mm = std::numeric_limits<double>::max();
     for (const ExtrusionEntity *entity : this->entities)
-    	min_mm3_per_mm = std::min(min_mm3_per_mm, entity->min_mm3_per_mm());
+        min_mm3_per_mm = std::min(min_mm3_per_mm, entity->min_mm3_per_mm());
     return min_mm3_per_mm;
+}
+
+// Fail closed: an override must never recolor an external wall, a thin wall,
+// gap fill or an untagged path sharing a collection with a purge candidate.
+bool ExtrusionEntityCollection::is_purge_inner_wall_candidate() const
+{
+    return !entities.empty() && std::all_of(entities.begin(), entities.end(), [](const ExtrusionEntity *entity) {
+        if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity))
+            return collection->is_purge_inner_wall_candidate();
+        const auto *loop = dynamic_cast<const ExtrusionLoop *>(entity);
+        return loop != nullptr && loop->is_purge_inner_wall_candidate && loop->inset_idx > 0 && !loop->paths.empty() &&
+               std::all_of(loop->paths.begin(), loop->paths.end(), [](const ExtrusionPath &path) {
+                   return path.role() == erPerimeter || path.role() == erOverhangPerimeter;
+               });
+    });
+}
+
+void ExtrusionEntityCollection::split_purge_inner_walls()
+{
+    ExtrusionEntityCollection separated;
+    // Move, rather than clone, the leaves so the allocator, seam placer and
+    // G-code writer all see the same wall entities. Depth-first traversal
+    // preserves the generators' ordering, including deferred overhang loops.
+    const auto separate = [&separated](auto &&self, std::unique_ptr<ExtrusionEntity> entity) -> void {
+        if (auto *collection = dynamic_cast<ExtrusionEntityCollection *>(entity.get())) {
+            for (ExtrusionEntity *&child : collection->entities)
+                self(self, std::unique_ptr<ExtrusionEntity>(std::exchange(child, nullptr)));
+        } else {
+            auto wall = std::make_unique<ExtrusionEntityCollection>();
+            wall->entities.emplace_back(entity.get());
+            entity.release();
+            separated.entities.emplace_back(wall.get());
+            wall.release();
+        }
+    };
+    for (ExtrusionEntity *&entity : entities)
+        separate(separate, std::unique_ptr<ExtrusionEntity>(std::exchange(entity, nullptr)));
+    entities.swap(separated.entities);
+}
+
+std::vector<ExtrusionEntityCollection::PurgeInnerWall> ExtrusionEntityCollection::purge_inner_walls(
+    const std::vector<const ExtrusionEntityCollection *> &collections)
+{
+    struct Wall {
+        const ExtrusionEntityCollection *collection;
+        Polygon polygon;
+        int inset;
+        bool hole;
+    };
+    std::vector<Wall> walls;
+    for (const auto *collection : collections) {
+        // split_purge_inner_walls() guarantees one loop per collection. Fail
+        // closed if a pipeline plugin replaces it with an unsplit group.
+        if (collection == nullptr || collection->entities.size() != 1 || !collection->is_purge_inner_wall_candidate())
+            continue;
+        const auto *loop = dynamic_cast<const ExtrusionLoop *>(collection->entities.front());
+        if (loop == nullptr || std::any_of(loop->paths.begin(), loop->paths.end(), [](const ExtrusionPath &path) {
+                return path.polyline.points.size() < 2;
+            }))
+            continue;
+        bool closed = loop->paths.front().first_point() == loop->paths.back().last_point();
+        for (size_t i = 1; i < loop->paths.size() && closed; ++i)
+            closed = loop->paths[i - 1].last_point() == loop->paths[i].first_point();
+        if (!closed)
+            continue;
+        Polygon polygon = loop->polygon();
+        if (polygon.points.size() >= 3)
+            walls.push_back({collection, std::move(polygon), loop->inset_idx, (loop->loop_role() & elrHole) != 0});
+    }
+    std::stable_sort(walls.begin(), walls.end(), [](const Wall &a, const Wall &b) { return a.inset < b.inset; });
+
+    std::vector<PurgeInnerWall> result;
+    std::vector<size_t> shells;
+    for (size_t i = 0; i < walls.size(); ++i) {
+        const Wall &wall = walls[i];
+        PurgeInnerWall candidate{wall.collection, {}};
+        for (size_t shell_idx : shells) {
+            const Wall &shell = walls[shell_idx];
+            if (shell.inset >= wall.inset || shell.hole != wall.hole)
+                continue;
+            // Contours shrink inward; hole walls expand into the material.
+            // A deeper hole loop may surround multiple holes after they merge:
+            // keep every corresponding native shell, without double-counting it.
+            if (wall.hole ? wall.polygon.contains(shell.polygon.first_point()) :
+                            shell.polygon.contains(wall.polygon.first_point()))
+                candidate.shells.push_back(shell.collection);
+        }
+        if (candidate.shells.empty()) {
+            shells.push_back(i);
+            candidate.shells.push_back(wall.collection);
+        }
+        result.push_back(std::move(candidate));
+    }
+    for (size_t i = 0; i < walls.size(); ++i) {
+        if (result[i].is_shell())
+            continue;
+        for (size_t shell_idx : shells) {
+            const Wall &shell = walls[shell_idx];
+            if (shell.inset >= walls[i].inset || shell.hole == walls[i].hole)
+                continue;
+            // Deeper contours/holes can merge. Preserve both sides of the
+            // material, not only the boundary matching this loop's role.
+            if (walls[i].hole ? shell.polygon.contains(walls[i].polygon.first_point()) :
+                                walls[i].polygon.contains(shell.polygon.first_point()))
+                result[i].shells.push_back(shell.collection);
+        }
+    }
+    return result;
+}
+
+// Check if this collection contains existing (non-generated) purge walls.
+bool ExtrusionEntityCollection::is_existing_purge_wall() const
+{
+    for (const ExtrusionEntity *entity : entities) {
+        if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity)) {
+            if (collection->is_existing_purge_wall())
+                return true;
+        } else if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(entity)) {
+            if (loop->is_purge_inner_wall_candidate && !loop->generated_for_purge)
+                return true;
+        }
+    }
+    return false;
+}
+
+int ExtrusionEntityCollection::get_max_inset_idx() const
+{
+    int max_idx = -1;
+    for (const ExtrusionEntity *entity : entities) {
+        if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity))
+            max_idx = std::max(max_idx, collection->get_max_inset_idx());
+        else if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(entity))
+            if (loop->is_purge_inner_wall_candidate)
+                max_idx = std::max(max_idx, loop->inset_idx);
+    }
+    return max_idx;
 }
 
 }

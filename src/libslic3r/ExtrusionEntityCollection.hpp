@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <iterator>
 #include <cstddef>
+#include <vector>
 
 namespace Slic3r {
 
@@ -150,6 +151,24 @@ public:
     double min_mm3_per_mm() const override;
     double total_volume() const override { double volume=0.; for (const auto& ent : entities) volume+=ent->total_volume(); return volume; }
 
+    // Purge overrides apply to whole collections: every entity must be a
+    // tagged inner wall, never an outer wall bundled with an inner one.
+    bool is_purge_inner_wall_candidate() const;
+    // Split perimeter islands into individually overridable wall collections,
+    // preserving the wall entities, their metadata and their emission order.
+    void split_purge_inner_walls();
+    // For each separated inner wall, identify the closest inner loop(s) at
+    // its visible contour/hole boundary. Those loops may carry matching purge,
+    // but must remain in the exterior filament when deeper walls carry foreign purge.
+    struct PurgeInnerWall {
+        const ExtrusionEntityCollection *collection;
+        std::vector<const ExtrusionEntityCollection *> shells;
+        bool is_shell() const { return shells.size() == 1 && shells.front() == collection; }
+    };
+    static std::vector<PurgeInnerWall> purge_inner_walls(const std::vector<const ExtrusionEntityCollection *> &collections);
+    bool is_existing_purge_wall() const;
+    int get_max_inset_idx() const;
+
     // Following methods shall never be called on an ExtrusionEntityCollection.
     Polyline as_polyline() const override {
         throw Slic3r::RuntimeError("Calling as_polyline() on a ExtrusionEntityCollection");
@@ -174,6 +193,18 @@ public:
 private:
     bool is_reverse{true};
 };
+
+// Visits allocation units without copying them. A loop or multi-path stays a
+// single unit; collections are only grouping, not whole-support overrides.
+template<typename F> void for_each_extrusion_leaf(const ExtrusionEntity &entity, F &&f)
+{
+    if (auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(&entity)) {
+        for (const ExtrusionEntity *child : collection->entities)
+            for_each_extrusion_leaf(*child, f);
+    } else {
+        f(entity);
+    }
+}
 
 // Calls `f` for every ExtrusionPath in `entity`, descending into collections, loops and multi-paths.
 template<typename F> void for_each_extrusion_path(const ExtrusionEntity &entity, F &&f)

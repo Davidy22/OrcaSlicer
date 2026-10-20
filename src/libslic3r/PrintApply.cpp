@@ -2262,6 +2262,16 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             }
     }
 
+    // Purge wall demand is shared across objects. A changed source, target or
+    // copy count can change every donor's share, even if its own config is cached.
+    // Invalidate here, under apply's state lock, never from the slicing worker:
+    // invalidate_step may cancel and wait for that worker to stop.
+    if (m_config.purge_into_inner_walls && (print_regions_reshuffled || m_purge_perimeters_invalidated))
+        for (PrintObject *object : m_objects)
+            if (object->is_step_done_unguarded(posPerimeters) || object->is_step_started_unguarded(posPerimeters))
+                update_apply_status(object->invalidate_step(posPerimeters));
+    m_purge_perimeters_invalidated = false;
+
     //BBS: check the config again
     int new_used_filaments = this->extruders(true).size();
     t_config_option_keys new_changed_keys = unnormalized_config.normalize_fdm_2(objects().size(), new_used_filaments);
