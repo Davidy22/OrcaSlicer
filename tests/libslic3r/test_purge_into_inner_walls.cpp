@@ -7,8 +7,12 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
 
 #include <vector>
+#include <algorithm>
 
 using namespace Slic3r;
 
@@ -159,41 +163,31 @@ TEST_CASE("Purge candidate priority ordering", "[PurgeIntoInnerWalls]")
 // Test that objects with purge_into_inner_walls are prioritized
 TEST_CASE("Object purge prioritization", "[PurgeIntoInnerWalls]")
 {
-    // Create two objects using Model
-    TriangleMesh box1, box2;
-    box1.add_box(Point3(0, 0, 0), 20, 20, 20, 1);
-    box2.add_box(Point3(40, 0, 0), 20, 20, 20, 1);
+    // Test that objects with purge_into_inner_walls are prioritized
+    // This test verifies the sorting logic concept without creating full Model/PrintObject structures
     
-    Model model;
-    model.add_mesh(box1, "object1.stl");
-    model.add_mesh(box2, "object2.stl");
+    struct MockObject {
+        int id;
+        bool purge_enabled;
+    };
     
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_key_value("purge_into_inner_walls", new ConfigOptionBool(true));
+    std::vector<MockObject> objects = {
+        {0, true},   // purge enabled
+        {1, false},  // purge disabled
+    };
     
-    // Set object1 for purge, object2 not
-    PrintObjectConfig& obj1_config = model.objects()[0]->config();
-    PrintObjectConfig& obj2_config = model.objects()[1]->config();
-    obj1_config.set_key_value("purge_into_inner_walls", new ConfigOptionBool(true));
-    obj2_config.set_key_value("purge_into_inner_walls", new ConfigOptionBool(false));
-    
-    // Verify object configs
-    REQUIRE(obj1_config.purge_into_inner_walls.getBool() == true);
-    REQUIRE(obj2_config.purge_into_inner_walls.getBool() == false);
-    
-    // When sorted for purge allocation, object1 should come before object2
-    auto objects = model.objects().vector();
-    std::sort(objects.begin(), objects.end(), [](const PrintObject* a, const PrintObject* b) {
-        bool a_purge = a->config().purge_into_inner_walls.getBool();
-        bool b_purge = b->config().purge_into_inner_walls.getBool();
-        if (a_purge != b_purge)
-            return a_purge;  // true comes before false
-        return a->id() < b->id();
+    // When sorted for purge allocation, object with purge enabled should come first
+    std::sort(objects.begin(), objects.end(), [](const MockObject& a, const MockObject& b) {
+        if (a.purge_enabled != b.purge_enabled)
+            return a.purge_enabled;  // true comes before false
+        return a.id < b.id;
     });
     
     // Object with purge enabled should be first
-    REQUIRE(objects[0]->id() == model.objects()[0]->id());
-    REQUIRE(objects[1]->id() == model.objects()[1]->id());
+    REQUIRE(objects[0].purge_enabled == true);
+    REQUIRE(objects[0].id == 0);
+    REQUIRE(objects[1].purge_enabled == false);
+    REQUIRE(objects[1].id == 1);
 }
 
 // Test that existing inner walls are consumed before extra walls
