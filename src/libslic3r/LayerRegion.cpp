@@ -206,7 +206,7 @@ void LayerRegion::add_purge_extra_walls(const PrintConfig& print_config, const P
         // stInternal surfaces already have internal area
         // For other surface types, we can still add extra perimeters inward
         if (surface.surface_type == stInternal || 
-            surface.surface_type == stExternal) {
+            surface.is_external()) {
             surface.extra_perimeters++;
         }
     }
