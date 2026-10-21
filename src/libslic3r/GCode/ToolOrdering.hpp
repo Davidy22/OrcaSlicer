@@ -289,6 +289,8 @@ private:
 
 class ToolOrdering
 {
+    friend class Print;
+
 public:
     enum FilamentChangeMode {
         SingleExt,
