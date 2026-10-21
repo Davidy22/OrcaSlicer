@@ -191,8 +191,13 @@ int ExtrusionEntityCollection::get_max_inset_idx() const
     for (const auto& entity : this->entities) {
         if (entity->is_loop()) {
             const ExtrusionLoop* loop = static_cast<const ExtrusionLoop*>(entity);
-            if (loop->is_purge_inner_wall_candidate && loop->inset_idx > max_idx)
-                max_idx = loop->inset_idx;
+            if (loop->is_purge_inner_wall_candidate) {
+                // Find max inset_idx in this loop's paths
+                for (const ExtrusionPath& path : loop->paths) {
+                    if (path.inset_idx > max_idx)
+                        max_idx = path.inset_idx;
+                }
+            }
         }
     }
     return max_idx;

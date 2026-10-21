@@ -222,15 +222,32 @@ void LayerRegion::plan_purge_inner_walls(const PrintConfig& print_config, const 
     
     for (const ExtrusionEntity* ee : this->perimeters.entities) {
         auto* coll = dynamic_cast<const ExtrusionEntityCollection*>(ee);
-        if (!coll || !coll->is_purge_inner_wall_candidate())
+        if (!coll)
+            continue;
+        
+        // Check if any contained loop is a purge candidate
+        bool has_purge_candidate = false;
+        int coll_max_inset = -1;
+        for (const ExtrusionEntity* child : coll->entities) {
+            auto* loop = dynamic_cast<const ExtrusionLoop*>(child);
+            if (loop && loop->is_purge_inner_wall_candidate) {
+                has_purge_candidate = true;
+                // Find max inset_idx in this loop's paths
+                for (const ExtrusionPath& path : loop->paths) {
+                    if (path.inset_idx > coll_max_inset)
+                        coll_max_inset = path.inset_idx;
+                }
+            }
+        }
+        
+        if (!has_purge_candidate)
             continue;
         
         existing_volume += coll->total_volume();
         existing_loop_count++;
         
-        int inset = coll->get_max_inset_idx();
-        if (inset > max_existing_inset)
-            max_existing_inset = inset;
+        if (coll_max_inset > max_existing_inset)
+            max_existing_inset = coll_max_inset;
     }
     
     // Store existing volume in plan
