@@ -256,7 +256,10 @@ static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perime
         ExtrusionLoop loop_obj(std::move(paths), loop_role);
         if (!is_external && perimeter_generator.print_config->purge_into_inner_walls.getBool()) {
             loop_obj.is_purge_inner_wall_candidate = true;
-            loop_obj.generated_for_purge = false;
+            // Loops at wall_loops and deeper exist only because of extra_perimeters
+            // (which the purge capacity planning bumps per surface); mark them as
+            // generated for purge so regular walls are consumed first at allocation.
+            loop_obj.generated_for_purge = int(loop.depth) >= perimeter_generator.config->wall_loops.value;
             loop_obj.purge_candidate_priority = 1000 + loop.depth;
         }
         coll.append(std::move(loop_obj));
@@ -578,7 +581,9 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
                 // ORCA: Purge into inner walls - tag inner walls (non-external) as purge candidates
                 if (extrusion->inset_idx > 0 && perimeter_generator.print_config->purge_into_inner_walls.getBool()) {
                     extrusion_loop.is_purge_inner_wall_candidate = true;
-                    extrusion_loop.generated_for_purge = false;
+                    // See traverse_loops(): loops at wall_loops and deeper come
+                    // from extra_perimeters, i.e. from the purge capacity planning.
+                    extrusion_loop.generated_for_purge = int(extrusion->inset_idx) >= perimeter_generator.config->wall_loops.value;
                     extrusion_loop.purge_candidate_priority = 1000 + extrusion->inset_idx;
                 }
                 

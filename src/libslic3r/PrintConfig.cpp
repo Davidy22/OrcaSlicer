@@ -8177,13 +8177,8 @@ void PrintConfigDef::init_fff_params()
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionBool(false));
 
-    def = this->add("purge_inner_walls_max_extra_loops", coInt);
-    def->label = L("Max extra inner wall loops");
-    def->tooltip = L("Maximum number of extra inner wall loops that can be generated for purge material. "
-        "-1 means automatic until solid-equivalent.");
-    def->mode = comAdvanced;
-    def->min = -1;
-    def->set_default_value(new ConfigOptionInt(-1));
+    // No cap option for the extra loops: they are grown automatically until the
+    // layer's purge volume fits (or the object is solid there).
 
     // Per-object prioritization toggle for purge_into_inner_walls (see PrintObjectConfig)
     def = this->add("purge_into_inner_walls_preferred", coBool);

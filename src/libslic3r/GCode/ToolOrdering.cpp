@@ -3570,11 +3570,9 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
     // ORCA: Purge into inner walls - handle purge mode separately
     // This replaces the prime tower; no tower fallback
     if (print.config().purge_into_inner_walls.getBool()) {
+        const float requested_volume = std::max(0.f, volume_to_wipe);
         float purge_consumed = 0.f;
-        float max_shortfall = 0.f;
-        int affected_layers = 0;
-        int affected_transitions = 0;
-        
+
         // Process objects prioritized for purge (purge_into_inner_walls_preferred) first;
         // any remaining purge volume then flows into unmarked objects' inner walls.
         ConstPrintObjectPtrs purge_object_list = print.objects().vector();
@@ -3586,20 +3584,56 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
             }
             return a->id() < b->id();
         });
-        
+
+        // Proportional reduction: if this layer's inner walls cannot absorb
+        // the layer's total purge demand even after the demand-driven wall
+        // growth in PrintObject::make_perimeters(), scale every toolchange on
+        // the layer down by the same factor. The walls then still fill
+        // completely (no unprinted gaps), each color is short by the same
+        // relative amount, and the shortfall is reported by
+        // Print::_plan_purge_into_inner_walls(). Computed lazily on the
+        // layer's first toolchange, before any of its walls are overridden
+        // by this block (the standard phase above skips objects without
+        // flush_into_*; if those consumed candidates first, capacity is
+        // overestimated and the greedy consumption below stays safe).
+        if (m_purge_layer_scale < 0.f) {
+            float capacity = 0.f;
+            for (const PrintObject* object : purge_object_list) {
+                const Layer* this_layer = object->get_layer_at_printz(lt.print_z, EPSILON);
+                if (this_layer == nullptr)
+                    continue;
+                const float copies = float(object->instances().size());
+                for (const LayerRegion *layerm : this_layer->regions())
+                    for (const ExtrusionEntity* ee : layerm->perimeters.entities) {
+                        auto* coll = dynamic_cast<const ExtrusionEntityCollection*>(ee);
+                        if (coll && coll->is_purge_inner_wall_candidate())
+                            capacity += static_cast<float>(coll->total_volume()) * copies;
+                    }
+            }
+            float layer_demand = 0.f;
+            unsigned int prev_extruder = old_extruder;
+            for (const unsigned int extruder_id : lt.extruders) {
+                layer_demand += estimate_flush_volume(print.config(), prev_extruder, extruder_id);
+                prev_extruder = extruder_id;
+            }
+            m_purge_layer_scale = layer_demand > 0.f ? std::min(1.f, capacity / layer_demand) : 1.f;
+        }
+        float remaining = requested_volume * m_purge_layer_scale;
+
         // Track statistics
         float total_existing_volume = 0.f;
         float total_extra_volume = 0.f;
-        
-        // Consume the purge volume from objects in priority order (all objects are
-        // eligible; consumption stops once the volume is exhausted)
+
+        // Consume the (possibly reduced) purge budget from objects in
+        // priority order (all objects are eligible; consumption stops once
+        // the budget is exhausted)
         for (const PrintObject* object : purge_object_list) {
             const Layer* this_layer = object->get_layer_at_printz(lt.print_z, EPSILON);
             if (this_layer == nullptr)
                 continue;
-                
+
             size_t num_of_copies = object->instances().size();
-            
+
             // Collect all purge inner wall candidates from this layer
             struct PurgeCandidate {
                 const ExtrusionEntityCollection* collection;
@@ -3611,14 +3645,14 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                 float volume;
             };
             std::vector<PurgeCandidate> candidates;
-            
+
             for (unsigned int copy = 0; copy < num_of_copies; ++copy) {
                 for (const LayerRegion *layerm : this_layer->regions()) {
                     for (const ExtrusionEntity* ee : layerm->perimeters.entities) {
                         auto* coll = dynamic_cast<const ExtrusionEntityCollection*>(ee);
                         if (!coll || !coll->is_purge_inner_wall_candidate())
                             continue;
-                            
+
                         bool is_preferred_obj = object->config().purge_into_inner_walls_preferred.getBool();
                         int priority = 0;
                         if (is_preferred_obj)
@@ -3626,10 +3660,10 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                         if (coll->is_existing_purge_wall())
                             priority += 1000;
                         priority += coll->get_max_inset_idx();
-                        
+
                         candidates.push_back({coll, object, copy, priority, is_preferred_obj,
                                               coll->is_existing_purge_wall(), static_cast<float>(coll->total_volume())});
-                      
+
                       if (coll->is_existing_purge_wall())
                           total_existing_volume += static_cast<float>(coll->total_volume());
                       else
@@ -3637,7 +3671,7 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                     }
                 }
             }
-            
+
             std::sort(candidates.begin(), candidates.end(), [](const PurgeCandidate& a, const PurgeCandidate& b) {
                 if (a.is_preferred_object != b.is_preferred_object)
                     return a.is_preferred_object > b.is_preferred_object;
@@ -3645,36 +3679,39 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                     return a.priority > b.priority;
                 return a.volume > b.volume;
             });
-            
+
             for (const auto& cand : candidates) {
-                if (volume_to_wipe <= 0.f)
+                if (remaining <= 0.f)
                     break;
                 if (is_entity_overridden(cand.collection, cand.object, cand.copy))
                     continue;
-                    
+
                 set_extruder_override(cand.collection, cand.object, cand.copy, new_extruder, num_of_copies);
                 float consumed = cand.volume;
-                volume_to_wipe -= consumed;
+                remaining -= consumed;
                 purge_consumed += consumed;
             }
         }
 
-        // Whatever is left after all objects have been tried is this toolchange's shortfall
-        if (volume_to_wipe > 0.f) {
-            max_shortfall = volume_to_wipe;
-            affected_layers = 1;
-            affected_transitions = 1;
-        }
+        // The part of the requested volume that did not fit into inner walls
+        // (because of the proportional reduction, or because whole candidate
+        // collections are coarser than the budget).
+        const float shortfall = std::max(0.f, requested_volume - purge_consumed);
 
         // Update statistics
-        stats.purge_inner_walls_requested_volume_mm3 += purge_consumed + max_shortfall;
+        stats.purge_inner_walls_requested_volume_mm3 += requested_volume;
         stats.purge_inner_walls_existing_volume_mm3 += total_existing_volume;
         stats.purge_inner_walls_extra_volume_mm3 += total_extra_volume;
-        stats.purge_inner_walls_reduced_volume_mm3 += max_shortfall;
-        stats.purge_inner_walls_affected_layer_count += affected_layers;
-        stats.purge_inner_walls_affected_transition_count += affected_transitions;
+        stats.purge_inner_walls_reduced_volume_mm3 += shortfall;
+        if (shortfall > 0.f) {
+            ++stats.purge_inner_walls_affected_transition_count;
+            if (!m_purge_shortfall_counted) {
+                m_purge_shortfall_counted = true;
+                ++stats.purge_inner_walls_affected_layer_count;
+            }
+        }
 
-        return std::max(0.f, volume_to_wipe);
+        return shortfall;
     }
 
     // Some purge remains to be done on the Wipe Tower.

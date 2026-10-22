@@ -595,25 +595,183 @@ void PrintObject::make_perimeters()
         [this](const tbb::blocked_range<size_t>& range) {
             for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
                 m_print->throw_if_canceled();
-                
-                // ORCA: Purge into inner walls - add extra walls before perimeter generation
-                // This adds extra inner wall loops for purge capacity on prioritized objects
-                const PrintConfig& print_config = m_print->config();
-                if (print_config.purge_into_inner_walls.getBool()) {
-                    for (size_t region_id = 0; region_id < m_layers[layer_idx]->region_count(); ++region_id) {
-                        LayerRegion* layerm = m_layers[layer_idx]->get_region(region_id);
-                        if (layerm && layerm->layer()->object()->config().purge_into_inner_walls_preferred.getBool()) {
-                            layerm->add_purge_extra_walls(print_config, layerm->layer()->object()->config());
-                        }
-                    }
-                }
-                
                 m_layers[layer_idx]->make_perimeters();
             }
         }
     );
     m_print->throw_if_canceled();
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - end";
+
+    // ORCA: Purge into inner walls - on prioritized objects, grow extra inner
+    // wall loops layer by layer until the tagged inner walls can absorb this
+    // object's share of the layer's purge volume (or the object is solid
+    // there). This runs after the regular perimeters above so the existing
+    // candidate volume is measured from real toolpaths; layers that need more
+    // loops are regenerated with bumped Surface::extra_perimeters (infill has
+    // not run yet, so regeneration is safe). The purge allocation itself
+    // happens later, in Print::_plan_purge_into_inner_walls().
+    {
+        const PrintConfig &purge_cfg = m_print->config();
+        if (purge_cfg.purge_into_inner_walls.getBool() && !purge_cfg.spiral_mode.getBool()
+            && purge_cfg.print_sequence != PrintSequence::ByObject
+            && this->config().purge_into_inner_walls_preferred.getBool() && !m_layers.empty()) {
+            const float num_copies = float(std::max<size_t>(this->instances().size(), 1));
+
+            // Filaments printing on a layer, from the region filament
+            // assignments (1-based ids -> 0-based matrix indices, like
+            // LayerTools::wall_extruder_id()). ToolOrdering::collect_extruders
+            // cannot be used here: it reads generated toolpaths.
+            auto layer_filaments = [](const Layer *layer) {
+                std::set<unsigned int> filaments;
+                if (layer == nullptr)
+                    return filaments;
+                for (const LayerRegion *layerm : layer->regions()) {
+                    if (layerm->slices.empty())
+                        continue;
+                    const PrintRegionConfig &rcfg = layerm->region().config();
+                    auto add_filament = [&filaments](int filament_id) {
+                        if (filament_id > 0)
+                            filaments.insert((unsigned int) (filament_id - 1));
+                    };
+                    add_filament(rcfg.outer_wall_filament_id.value);
+                    if (rcfg.wall_loops.value > 1)
+                        add_filament(rcfg.inner_wall_filament_id.value);
+                    add_filament(rcfg.sparse_infill_filament_id.value);
+                    add_filament(rcfg.internal_solid_filament_id.value);
+                    add_filament(rcfg.top_surface_filament_id.value);
+                    add_filament(rcfg.bottom_surface_filament_id.value);
+                }
+                return filaments;
+            };
+
+            // This object's share of each layer's purge demand: the total
+            // demand of a layer is the sum of the flush volumes of its
+            // toolchanges (in print order, estimate only) and is split evenly
+            // between the prioritized objects present on that layer. Whatever
+            // is still missing at allocation time falls back to unmarked
+            // objects' existing walls and then to proportional reduction
+            // (with a warning), so an over-estimate only costs extra walls.
+            std::vector<float> demand(m_layers.size(), 0.f);
+            {
+                std::vector<const PrintObject *> objects;
+                for (const PrintObject *object : m_print->objects())
+                    objects.push_back(object);
+                int prev_filament = -1;
+                for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx) {
+                    const coordf_t z = m_layers[layer_idx]->print_z;
+                    float layer_demand    = 0.f;
+                    int   preferred_count = 0;
+                    for (const PrintObject *object : objects) {
+                        const Layer *layer = object->get_layer_at_printz(z, EPSILON);
+                        if (layer == nullptr)
+                            continue;
+                        if (object->config().purge_into_inner_walls_preferred.getBool())
+                            ++preferred_count;
+                        for (const unsigned int filament : layer_filaments(layer)) {
+                            if (prev_filament >= 0 && (int) filament != prev_filament)
+                                layer_demand += estimate_flush_volume(purge_cfg, (unsigned int) prev_filament, filament);
+                            prev_filament = (int) filament;
+                        }
+                    }
+                    if (preferred_count > 0)
+                        demand[layer_idx] = layer_demand / float(preferred_count);
+                }
+            }
+
+            std::vector<int>   extra_loops(m_layers.size(), 0), applied_loops(m_layers.size(), 0);
+            std::vector<float> measured(m_layers.size(), 0.f);
+            auto measure_layer = [this, num_copies](size_t layer_idx) {
+                float volume = 0.f;
+                for (const LayerRegion *layerm : m_layers[layer_idx]->regions())
+                    volume += layerm->purge_candidate_volume();
+                return volume * num_copies;
+            };
+            for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx) {
+                measured[layer_idx] = measure_layer(layer_idx);
+                for (LayerRegion *layerm : m_layers[layer_idx]->regions())
+                    layerm->purge_inner_wall_plan.existing_inner_wall_volume_mm3 = layerm->purge_candidate_volume();
+            }
+
+            // Grow loops, propagate the wall counts downward, regenerate and
+            // re-measure. The offset projection is an estimate, so allow a
+            // few correction cycles. There is deliberately no configurable
+            // loop cap: growth stops when the purge volume fits or the layer
+            // is solid.
+            for (int cycle = 0; cycle < 3; ++cycle) {
+                bool changed = false;
+                for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx) {
+                    if (demand[layer_idx] <= 0.f || measured[layer_idx] >= demand[layer_idx])
+                        continue;
+                    // Projected extra candidate volume (all copies) after
+                    // 1, 2, ... more loops, merged over the layer's regions;
+                    // a region that turns solid keeps contributing its final
+                    // total to every later entry.
+                    const float      cap = (demand[layer_idx] - measured[layer_idx]) / num_copies;
+                    std::vector<float> cumulative;
+                    for (const LayerRegion *layerm : m_layers[layer_idx]->regions()) {
+                        std::vector<float> region_cumulative = layerm->purge_extra_loop_cumulative_volumes(applied_loops[layer_idx], cap);
+                        if (cumulative.size() < region_cumulative.size())
+                            cumulative.resize(region_cumulative.size(), cumulative.empty() ? 0.f : cumulative.back());
+                        for (size_t i = 0; i < region_cumulative.size(); ++i)
+                            cumulative[i] += region_cumulative[i] * num_copies;
+                        const float region_total = (region_cumulative.empty() ? 0.f : region_cumulative.back()) * num_copies;
+                        for (size_t i = region_cumulative.size(); i < cumulative.size(); ++i)
+                            cumulative[i] += region_total;
+                    }
+                    int add_loops = 0;
+                    while (add_loops < (int) cumulative.size() && measured[layer_idx] + cumulative[(size_t) add_loops] < demand[layer_idx])
+                        ++add_loops;
+                    if (add_loops < (int) cumulative.size())
+                        ++add_loops; // cumulative[i] holds the volume of i+1 loops
+                    // else: every projected loop to solid is needed.
+                    if (add_loops > 0) {
+                        extra_loops[layer_idx] += add_loops;
+                        changed = true;
+                    }
+                }
+                // Downward support propagation: the layer below must carry
+                // at least (extra loops of the layer above - 1), so a
+                // purge-driven spike in wall count never prints into air.
+                for (size_t layer_idx = m_layers.size() - 1; layer_idx-- > 0;) {
+                    const int needed = extra_loops[layer_idx + 1] - 1;
+                    if (extra_loops[layer_idx] < needed) {
+                        extra_loops[layer_idx] = needed;
+                        changed = true;
+                    }
+                }
+                if (!changed)
+                    break;
+                tbb::parallel_for(
+                    tbb::blocked_range<size_t>(0, m_layers.size()),
+                    [this, &extra_loops, &applied_loops](const tbb::blocked_range<size_t> &range) {
+                        for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++layer_idx) {
+                            const int delta = extra_loops[layer_idx] - applied_loops[layer_idx];
+                            if (delta <= 0)
+                                continue;
+                            m_print->throw_if_canceled();
+                            for (LayerRegion *layerm : m_layers[layer_idx]->regions())
+                                layerm->apply_purge_extra_perimeters(delta);
+                            m_layers[layer_idx]->make_perimeters();
+                            applied_loops[layer_idx] = extra_loops[layer_idx];
+                        }
+                    });
+                m_print->throw_if_canceled();
+                for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx)
+                    measured[layer_idx] = measure_layer(layer_idx);
+            }
+
+            for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx) {
+                const bool capacity_limited = measured[layer_idx] < demand[layer_idx];
+                for (LayerRegion *layerm : m_layers[layer_idx]->regions()) {
+                    auto &plan                = layerm->purge_inner_wall_plan;
+                    plan.extra_loops          = extra_loops[layer_idx];
+                    plan.target_volume_mm3    = demand[layer_idx]; // assigned share, whole layer (all copies)
+                    plan.planned_volume_mm3   = layerm->purge_candidate_volume();
+                    plan.capacity_limited     = capacity_limited;
+                }
+            }
+        }
+    }
 
     this->set_done(posPerimeters);
 }

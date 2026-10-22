@@ -113,6 +113,15 @@ private:
     bool something_overridable = false;
     bool something_overridden = false;
     const LayerTools* m_layer_tools = nullptr;    // so we know which LayerTools object this belongs to
+
+    // ORCA: Purge into inner walls - per-layer proportional reduction state.
+    // m_purge_layer_scale (< 0 = not computed yet): fraction of each
+    // toolchange's requested purge volume that this layer's inner walls can
+    // absorb in total, applied uniformly to all toolchanges on the layer.
+    // m_purge_shortfall_counted: this layer already contributed to the
+    // affected-layer statistics (counted once per layer, not per toolchange).
+    float m_purge_layer_scale = -1.f;
+    bool  m_purge_shortfall_counted = false;
 };
 
 

@@ -522,13 +522,11 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             osteps.emplace_back(posSimplifySupportPath);
             steps.emplace_back(psSkirtBrim);
         }
-        else if (
-               opt_key == "purge_into_inner_walls"
-            || opt_key == "purge_inner_walls_max_extra_loops") {
+        else if (opt_key == "purge_into_inner_walls") {
             // Inner walls are tagged as purge candidates during perimeter generation
             // (and prioritized objects gain extra wall loops); purge allocation
-            // happens in the wipe tower step. These are global (PrintConfig) keys,
-            // so they never show up in per-object config diffs.
+            // happens in the wipe tower step. This is a global (PrintConfig) key,
+            // so it never shows up in per-object config diffs.
             osteps.emplace_back(posPerimeters);
             steps.emplace_back(psWipeTower);
         }
@@ -3505,6 +3503,14 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         else if (this->has_wipe_tower()) {
             this->_make_wipe_tower();
         }
+        else if (m_config.purge_into_inner_walls.getBool() && !m_config.spiral_mode.value
+                 && this->config().print_sequence != PrintSequence::ByObject) {
+            // Purge into inner walls replaces the prime tower (mutually exclusive,
+            // see normalize_fdm), so has_wipe_tower() is false and _make_wipe_tower()
+            // would never mark any purge extrusions. Run the dedicated planner
+            // instead, mirroring _plan_belt_purge().
+            this->_plan_purge_into_inner_walls();
+        }
         else if (this->config().print_sequence != PrintSequence::ByObject) {
             // Initialize the tool ordering, so it could be used by the G-code preview slider for planning tool changes and filament switches.
             m_tool_ordering = ToolOrdering(*this, -1, false);
@@ -5464,6 +5470,81 @@ void Print::_make_wipe_tower()
         // The cutter/purge corner is a physical obstacle — the brim must stay out like the body.
         if (!intersection(get_bed_excluded_area(m_config), Polygons{footprint}).empty())
             throw Slic3r::SlicingError(L("Prime tower is too close to an exclusion area, and collisions will be caused.\n"));
+    }
+}
+
+// Purge into inner walls: route filament-change purging into the tagged inner
+// wall loops instead of a prime tower. has_wipe_tower() is false in this mode
+// (normalize_fdm disables the prime tower), so _make_wipe_tower() never runs
+// and nothing would ever mark the purge extrusions without this planner.
+// Mirrors _plan_belt_purge(): build the tool ordering, then for every
+// toolchange mark inner walls as purge extrusions (prioritized objects first,
+// proportionally reduced when a layer's walls cannot absorb the full volume -
+// see WipingExtrusions::mark_wiping_extrusions()) and finally warn if some
+// purge volume could not be absorbed even after growing extra wall loops.
+void Print::_plan_purge_into_inner_walls()
+{
+    // No initial priming extrusions: there is no tower to prime on.
+    m_wipe_tower_data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, false);
+    m_wipe_tower_data.tool_ordering.sort_and_build_data(*this, (unsigned int) -1, false);
+
+    if (m_wipe_tower_data.tool_ordering.empty() || m_wipe_tower_data.tool_ordering.last_extruder() == unsigned(-1))
+        throw Slic3r::SlicingError(_u8L("The print is empty. The model is not printable with current print settings."));
+
+    // Is there any filament change at all? Single-filament prints have nothing to purge.
+    {
+        bool         any_change = false;
+        unsigned int cur        = m_wipe_tower_data.tool_ordering.first_extruder();
+        for (const auto &lt : m_wipe_tower_data.tool_ordering.layer_tools())
+            for (const unsigned int e : lt.extruders)
+                if (e != cur) { any_change = true; cur = e; }
+        if (! any_change)
+            return;
+    }
+
+    this->throw_if_canceled();
+
+    float  total_leftover       = 0.f;
+    float  worst_layer_leftover = 0.f;
+    double worst_layer_z        = 0.;
+
+    unsigned int current_extruder_id = m_wipe_tower_data.tool_ordering.first_extruder();
+    for (auto &layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) {
+        float layer_leftover = 0.f;
+        for (const unsigned int extruder_id : layer_tools.extruders) {
+            if (extruder_id == current_extruder_id)
+                continue;
+            const float volume_to_wipe = estimate_flush_volume(m_config, current_extruder_id, extruder_id);
+            float leftover = layer_tools.wiping_extrusions().mark_wiping_extrusions(*this, current_extruder_id, extruder_id,
+                                                                                    volume_to_wipe, m_tool_ordering.m_stats_by_single_extruder);
+            layer_leftover += leftover;
+            current_extruder_id = extruder_id;
+        }
+
+        layer_tools.wiping_extrusions().ensure_perimeters_infills_order(*this);
+        if (layer_leftover > 0.f) {
+            total_leftover += layer_leftover;
+            if (layer_leftover > worst_layer_leftover) {
+                worst_layer_leftover = layer_leftover;
+                worst_layer_z        = layer_tools.print_z;
+            }
+        }
+        this->throw_if_canceled();
+    }
+
+    if (total_leftover > 1.f) {
+        const auto &stats = m_tool_ordering.m_stats_by_single_extruder;
+        this->active_step_add_warning(
+            PrintStateBase::WarningLevel::CRITICAL,
+            Slic3r::format(_u8L("Purge into inner walls could not absorb the full purge volume: %1% mm³ in total could not "
+                                "be purged into inner walls even after growing extra wall loops (worst layer: %2% mm³ at height %3%; "
+                                "%4% toolchanges on %5% layers affected). The purge volume was reduced proportionally on those "
+                                "layers, so the print may show color bleeding. Increase the number of wall loops, prioritize "
+                                "larger objects for purging, or use a prime tower instead."),
+                           int(std::ceil(total_leftover)), int(std::ceil(worst_layer_leftover)),
+                           Slic3r::float_to_string_decimal_point(worst_layer_z, 2),
+                           stats.purge_inner_walls_affected_transition_count,
+                           stats.purge_inner_walls_affected_layer_count));
     }
 }
 

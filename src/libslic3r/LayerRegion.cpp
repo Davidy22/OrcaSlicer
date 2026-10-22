@@ -171,98 +171,101 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     else
         g.process_classic();
 
-    // ORCA: Purge into inner walls - plan extra walls if needed
-    if (print_config.purge_into_inner_walls.getBool()) {
-        this->plan_purge_inner_walls(print_config, object_config);
-    }
+    // ORCA: Purge into inner walls capacity planning is driven by
+    // PrintObject::make_perimeters(): it measures the purge candidate volume
+    // of the perimeters generated here and regenerates layers that need
+    // extra inner wall loops (see purge_candidate_volume() below).
 }
 
-// ORCA: Add extra purge inner walls before perimeter generation
-// This is called before make_perimeters to add extra inner wall loops for purge capacity
-void LayerRegion::add_purge_extra_walls(const PrintConfig& print_config, const PrintObjectConfig& object_config)
+// ORCA: Purge into inner walls - volume of the generated inner walls that are
+// tagged as purge candidates (single copy). The purge allocation overrides
+// whole collections, so measure whole candidate collections, exactly like
+// WipingExtrusions::mark_wiping_extrusions() accounts them.
+float LayerRegion::purge_candidate_volume() const
 {
-    // Only add extra walls if:
-    // 1. Global purge_into_inner_walls is enabled
-    // 2. This object is prioritized for purge (purge_into_inner_walls_preferred)
-    if (!print_config.purge_into_inner_walls.getBool())
-        return;
-    if (!object_config.purge_into_inner_walls_preferred.getBool())
-        return;
-    
-    // Need at least 1 wall loop to add extra walls
-    // wall_loops=0 means no walls at all, can't add purge walls
-    if (region().config().wall_loops.value < 1)
-        return;
-    
-    // Add extra perimeter loops for purge capacity
-    // The extra_perimeters mechanism adds walls inward from existing perimeters
-    // This works for any object with at least one wall loop
-    // Extra walls are generated inward from the innermost existing wall
-    
-    // Add 1 extra inner wall loop for purge capacity on all surfaces
-    // that can have internal perimeters (not just top/bottom surfaces)
-    for (Surface& surface : this->slices.surfaces) {
-        // Only add to surfaces that can have internal perimeters
-        // stInternal surfaces already have internal area
-        // For other surface types, we can still add extra perimeters inward
-        if (surface.surface_type == stInternal || 
-            surface.is_external()) {
-            surface.extra_perimeters++;
-        }
-    }
-}
-
-// ORCA: Purge into inner walls - measure existing inner wall volume and plan extra walls
-void LayerRegion::plan_purge_inner_walls(const PrintConfig& print_config, const PrintObjectConfig& object_config)
-{
-    // Measure existing inner wall volume (purge candidates only)
-    float existing_volume = 0.f;
-    int max_existing_inset = -1;
-    int existing_loop_count = 0;
-    
+    float volume = 0.f;
     for (const ExtrusionEntity* ee : this->perimeters.entities) {
         auto* coll = dynamic_cast<const ExtrusionEntityCollection*>(ee);
-        if (!coll)
-            continue;
-        
-        // Check if any contained loop is a purge candidate
-        bool has_purge_candidate = false;
-        int coll_max_inset = -1;
-        for (const ExtrusionEntity* child : coll->entities) {
-            auto* loop = dynamic_cast<const ExtrusionLoop*>(child);
-            if (loop && loop->is_purge_inner_wall_candidate) {
-                has_purge_candidate = true;
-                // Find max inset_idx in this loop's paths
-                for (const ExtrusionPath& path : loop->paths) {
-                    if (path.inset_idx > coll_max_inset)
-                        coll_max_inset = path.inset_idx;
-                }
-            }
-        }
-        
-        if (!has_purge_candidate)
-            continue;
-        
-        existing_volume += coll->total_volume();
-        existing_loop_count++;
-        
-        if (coll_max_inset > max_existing_inset)
-            max_existing_inset = coll_max_inset;
+        if (coll && coll->is_purge_inner_wall_candidate())
+            volume += float(coll->total_volume());
     }
-    
-    // Store existing volume in plan
-    this->purge_inner_wall_plan.existing_inner_wall_volume_mm3 = existing_volume;
-    this->purge_inner_wall_plan.extra_loops = 0;
-    
-    // Note: Extra wall generation is handled during tool ordering when purge demand is known.
-    // The actual generation of extra walls would need to be integrated with the perimeter generator,
-    // which requires regenerating perimeters after knowing the demand. This is a complex operation
-    // that would require:
-    // 1. Computing purge demand per layer/transition
-    // 2. Determining if existing capacity is sufficient
-    // 3. Generating extra inner wall loops if needed
-    // 4. Ensuring downward support propagation
-    // For now, we track the existing capacity and leave extra generation as a future enhancement.
+    return volume;
+}
+
+// ORCA: Purge into inner walls - take extra_loops more inner wall loops into
+// account on the next make_perimeters() run. The perimeter generator emits
+// wall_loops + Surface::extra_perimeters loops, so this just bumps the surfaces
+// that can carry inner walls (the same eligibility the candidate tagging uses).
+void LayerRegion::apply_purge_extra_perimeters(int extra_loops)
+{
+    if (extra_loops <= 0)
+        return;
+    // Need at least 1 wall loop: wall_loops=0 means no walls at all, so there
+    // are no inner walls to purge into.
+    if (region().config().wall_loops.value < 1)
+        return;
+    for (Surface& surface : this->slices.surfaces) {
+        if (surface.surface_type == stInternal || surface.is_external()) {
+            int new_value = int(surface.extra_perimeters) + extra_loops;
+            if (new_value > 10000)
+                new_value = 10000; // stay well inside the unsigned short storage
+            surface.extra_perimeters = (unsigned short)new_value;
+        }
+    }
+}
+
+// ORCA: Purge into inner walls - estimate how much candidate volume additional
+// inner wall loops would add, by marching the slice contours inward loop by
+// loop starting after the wall_loops + already_added_loops loops that exist
+// (or are already planned). Entry i is the cumulative volume of the first i+1
+// additional loops. Marching stops early once volume_cap is reached; without
+// a cap hit the vector ends where every surface of this region has turned
+// solid (offsets vanished). This only sizes the loop count - the generated
+// volume is re-measured with purge_candidate_volume() after regeneration.
+std::vector<float> LayerRegion::purge_extra_loop_cumulative_volumes(int already_added_loops, float volume_cap) const
+{
+    std::vector<float> cumulative;
+    const int wall_loops = region().config().wall_loops.value;
+    if (wall_loops < 1)
+        return cumulative;
+    const Flow perimeter_flow = this->flow(frPerimeter);
+    const coord_t spacing = perimeter_flow.scaled_spacing();
+    const double mm3_per_mm = perimeter_flow.mm3_per_mm();
+    if (spacing <= 0 || mm3_per_mm <= 0.)
+        return cumulative;
+
+    // 0-based index of the first loop that does not exist yet. Loop k's
+    // centerline sits approximately (k + 0.5) spacings inward from the slice
+    // contour (external-perimeter width differences are ignored).
+    const int first_new_loop = wall_loops + (already_added_loops > 0 ? already_added_loops : 0);
+    std::vector<ExPolygons> currents;
+    for (const Surface& surface : this->slices.surfaces) {
+        if (!(surface.surface_type == stInternal || surface.is_external()))
+            continue;
+        ExPolygons current = offset_ex(ExPolygons{surface.expolygon}, -float((first_new_loop + 0.5) * double(spacing)));
+        if (!current.empty())
+            currents.emplace_back(std::move(current));
+    }
+
+    float running = 0.f;
+    // Advance all surfaces in lockstep, one loop at a time. The iteration cap
+    // only guards against pathological offsets that refuse to shrink; real
+    // surfaces turn solid far earlier.
+    for (int loop = 0; loop < 10000; ++loop) {
+        double loop_length = 0.;
+        for (const ExPolygons& current : currents)
+            loop_length += total_length(to_polygons(current));
+        if (loop_length <= 0.)
+            break; // solid everywhere
+        running += float(unscale_(loop_length) * mm3_per_mm);
+        cumulative.push_back(running);
+        if (running >= volume_cap)
+            break;
+        for (ExPolygons& current : currents)
+            if (!current.empty())
+                current = offset_ex(current, -float(spacing));
+    }
+    return cumulative;
 }
 
 #if 1

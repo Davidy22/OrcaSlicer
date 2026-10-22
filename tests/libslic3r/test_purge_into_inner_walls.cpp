@@ -109,19 +109,19 @@ TEST_CASE("PrintConfig purge_into_inner_walls option", "[PurgeIntoInnerWalls]")
     const ConfigOption* purge_opt = config.option("purge_into_inner_walls");
     REQUIRE(purge_opt != nullptr);
     REQUIRE(purge_opt->getBool() == false);  // default is false
-    
-    // Check that max_extra_loops option exists
-    const ConfigOption* max_loops_opt = config.option("purge_inner_walls_max_extra_loops");
-    REQUIRE(max_loops_opt != nullptr);
-    REQUIRE(max_loops_opt->getInt() == -1);  // default is -1
 
-    // The feature toggles are global (PrintConfig) while the prioritization
+    // Extra wall loops are grown until the purge volume fits (or the layer
+    // is solid), so the former loop-count cap option must not exist anymore.
+    // (DynamicPrintConfig has no key whitelist, so absent def => nullptr.)
+    REQUIRE(config.option("purge_inner_walls_max_extra_loops") == nullptr);
+
+    // The feature toggle is global (PrintConfig) while the prioritization
     // toggle is per-object (PrintObjectConfig). Declaring the same key in both
     // classes would make FullPrintConfig register it twice (assert in
     // StaticCacheBase::opt_add) and direct member access ambiguous.
     REQUIRE(PrintConfig::defaults().has("purge_into_inner_walls"));
-    REQUIRE(PrintConfig::defaults().has("purge_inner_walls_max_extra_loops"));
-    REQUIRE_FALSE(PrintConfig::defaults().has("purge_into_inner_walls_preferred"));
+    REQUIRE_FALSE(PrintConfig::defaults().has("purge_inner_walls_preferred"));
+    REQUIRE_FALSE(PrintConfig::defaults().has("purge_inner_walls_max_extra_loops"));
     REQUIRE_FALSE(PrintObjectConfig::defaults().has("purge_into_inner_walls"));
     REQUIRE_FALSE(PrintObjectConfig::defaults().has("purge_inner_walls_max_extra_loops"));
     REQUIRE(PrintObjectConfig::defaults().has("purge_into_inner_walls_preferred"));
@@ -129,8 +129,39 @@ TEST_CASE("PrintConfig purge_into_inner_walls option", "[PurgeIntoInnerWalls]")
 
     const auto full_keys = FullPrintConfig::defaults().keys();
     REQUIRE(std::count(full_keys.begin(), full_keys.end(), "purge_into_inner_walls") == 1);
-    REQUIRE(std::count(full_keys.begin(), full_keys.end(), "purge_inner_walls_max_extra_loops") == 1);
+    REQUIRE(std::count(full_keys.begin(), full_keys.end(), "purge_inner_walls_max_extra_loops") == 0);
     REQUIRE(std::count(full_keys.begin(), full_keys.end(), "purge_into_inner_walls_preferred") == 1);
+}
+
+// Test the flush volume estimate shared by the wall-growth planning
+// (PrintObject::make_perimeters), the per-layer proportional reduction
+// (WipingExtrusions::mark_wiping_extrusions) and the allocation planner
+// (Print::_plan_purge_into_inner_walls).
+TEST_CASE("Purge flush volume estimate", "[PurgeIntoInnerWalls]")
+{
+    PrintConfig config = PrintConfig::defaults();
+    config.nozzle_diameter.values      = { 0.4 };
+    config.flush_volumes_matrix.values = { 0., 100., 200., 0. }; // 2x2, row-major
+    config.flush_multiplier.values     = { 1.0 };
+    config.prime_volume.value          = 42.;
+    config.purge_in_prime_tower.value        = true;
+    config.single_extruder_multi_material.value = true;
+
+    REQUIRE(estimate_flush_volume(config, 0, 1) == Catch::Approx(100.));
+    REQUIRE(estimate_flush_volume(config, 1, 0) == Catch::Approx(200.));
+    REQUIRE(estimate_flush_volume(config, 1, 1) == Catch::Approx(0.));
+
+    config.flush_multiplier.values = { 2.0 };
+    REQUIRE(estimate_flush_volume(config, 0, 1) == Catch::Approx(200.));
+
+    // Out-of-range filament falls back to the prime volume.
+    REQUIRE(estimate_flush_volume(config, 0, 5) == Catch::Approx(42.));
+
+    // Without purging volumes on a single-extruder multi-material printer,
+    // every toolchange purges the plain prime volume (belt semantics).
+    config.purge_in_prime_tower.value = false;
+    REQUIRE(estimate_flush_volume(config, 0, 1) == Catch::Approx(42.));
+    REQUIRE(estimate_flush_volume(config, 1, 1) == Catch::Approx(0.));
 }
 
 // Test purge candidate priority ordering
