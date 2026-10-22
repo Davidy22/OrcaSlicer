@@ -8416,26 +8416,6 @@ void PrintConfigDef::init_fff_params()
         "It will not take effect unless the prime tower is enabled.");
     def->set_default_value(new ConfigOptionBool(false));
 
-    // New purge-into-inner-walls options - replaces the prime tower
-    // This can be set per-object to prioritize objects for purge
-    def = this->add("purge_into_inner_walls", coBool);
-    def->category = L("Purge options");
-    def->label = L("Purge into inner walls");
-    def->tooltip = L("When enabled globally, this object's inner walls will be used for purge material. "
-        "Objects with this enabled are prioritized for purge allocation. "
-        "Inner walls are used first, extra walls are generated inward only if needed.");
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("purge_inner_walls_max_extra_loops", coInt);
-    def->category = L("Purge options");
-    def->label = L("Max extra inner wall loops for purge");
-    def->tooltip = L("Safety cap on extra inner wall loops beyond existing walls for purge material. "
-        "-1 means auto until solid-equivalent.");
-    def->sidetext = L("loops");
-    def->mode = comAdvanced;
-    def->min = -1;
-    def->set_default_value(new ConfigOptionInt(-1));
-
     // Internal marker (not shown in any settings tab): identifies the auto-generated
     // belt purge prism so it can be updated/removed by the auto-manager and aligned
     // to the object layer grid by the backend. Persisted to 3mf like any per-object key.

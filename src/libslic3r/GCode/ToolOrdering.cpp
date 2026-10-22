@@ -3575,25 +3575,15 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         int affected_layers = 0;
         int affected_transitions = 0;
         
-        // Re-sort objects to prioritize those with purge_into_inner_walls enabled
+        // All objects participate in purge when global setting is enabled
         ConstPrintObjectPtrs purge_object_list = print.objects().vector();
-        std::sort(purge_object_list.begin(), purge_object_list.end(), [purge_object_list](const PrintObject* a, const PrintObject* b) {
-            bool a_purge = a->config().purge_into_inner_walls.getBool();
-            bool b_purge = b->config().purge_into_inner_walls.getBool();
-            if (a_purge != b_purge) {
-                return a_purge;  // true comes before false
-            }
-            return a->id() < b->id();
-        });
         
         // Track statistics
         float total_existing_volume = 0.f;
         float total_extra_volume = 0.f;
         
-        // Process each object that has purge_into_inner_walls enabled
+        // Process each object
         for (const PrintObject* object : purge_object_list) {
-            if (!object->config().purge_into_inner_walls.getBool())
-                continue;
                 
             const Layer* this_layer = object->get_layer_at_printz(lt.print_z, EPSILON);
             if (this_layer == nullptr)
@@ -3620,15 +3610,12 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                         if (!coll || !coll->is_purge_inner_wall_candidate())
                             continue;
                             
-                        bool is_purge_obj = object->config().purge_into_inner_walls.getBool();
                         int priority = 0;
-                        if (is_purge_obj)
-                            priority += 10000;
                         if (coll->is_existing_purge_wall())
                             priority += 1000;
                         priority += coll->get_max_inset_idx();
                         
-                        candidates.push_back({coll, object, copy, priority, is_purge_obj, 
+                        candidates.push_back({coll, object, copy, priority, false, 
                                               coll->is_existing_purge_wall(), static_cast<float>(coll->total_volume())});
                       
                       if (coll->is_existing_purge_wall())

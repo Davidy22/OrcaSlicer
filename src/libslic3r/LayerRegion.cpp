@@ -181,12 +181,8 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
 // This is called before make_perimeters to add extra inner wall loops for purge capacity
 void LayerRegion::add_purge_extra_walls(const PrintConfig& print_config, const PrintObjectConfig& object_config)
 {
-    // Only add extra walls if:
-    // 1. Global purge_into_inner_walls is enabled
-    // 2. This object has purge_into_inner_walls enabled (prioritized for purge)
+    // Only add extra walls if global purge_into_inner_walls is enabled
     if (!print_config.purge_into_inner_walls.getBool())
-        return;
-    if (!object_config.purge_into_inner_walls.getBool())
         return;
     
     // Need at least 1 wall loop to add extra walls
