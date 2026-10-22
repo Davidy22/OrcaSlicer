@@ -602,19 +602,26 @@ void PrintObject::make_perimeters()
     m_print->throw_if_canceled();
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - end";
 
-    // ORCA: Purge into inner walls - on prioritized objects, grow extra inner
-    // wall loops layer by layer until the tagged inner walls can absorb this
-    // object's share of the layer's purge volume (or the object is solid
-    // there). This runs after the regular perimeters above so the existing
-    // candidate volume is measured from real toolpaths; layers that need more
-    // loops are regenerated with bumped Surface::extra_perimeters (infill has
-    // not run yet, so regeneration is safe). The purge allocation itself
-    // happens later, in Print::_plan_purge_into_inner_walls().
+    // ORCA: Purge into inner walls - grow extra inner wall loops layer by
+    // layer until the tagged inner walls can absorb this object's share of
+    // the layer's purge volume (or the object is solid there). Growth happens
+    // on objects marked "Prioritize purge into inner walls"; if no object is
+    // marked, every object grows loops, so the global toggle alone is enough
+    // to make the feature work. This runs after the regular perimeters above
+    // so the existing candidate volume is measured from real toolpaths;
+    // layers that need more loops are regenerated with bumped
+    // Surface::extra_perimeters (infill has not run yet, so regeneration is
+    // safe). The purge allocation itself happens later, in
+    // Print::_plan_purge_into_inner_walls().
     {
         const PrintConfig &purge_cfg = m_print->config();
+        bool any_preferred = false;
+        for (const PrintObject *object : m_print->objects())
+            any_preferred |= object->config().purge_into_inner_walls_preferred.getBool();
+        const bool grow_here = this->config().purge_into_inner_walls_preferred.getBool() || !any_preferred;
         if (purge_cfg.purge_into_inner_walls.getBool() && !purge_cfg.spiral_mode.getBool()
             && purge_cfg.print_sequence != PrintSequence::ByObject
-            && this->config().purge_into_inner_walls_preferred.getBool() && !m_layers.empty()) {
+            && grow_here && !m_layers.empty()) {
             const float num_copies = float(std::max<size_t>(this->instances().size(), 1));
 
             // Filaments printing on a layer, from the region filament
@@ -647,10 +654,11 @@ void PrintObject::make_perimeters()
             // This object's share of each layer's purge demand: the total
             // demand of a layer is the sum of the flush volumes of its
             // toolchanges (in print order, estimate only) and is split evenly
-            // between the prioritized objects present on that layer. Whatever
-            // is still missing at allocation time falls back to unmarked
-            // objects' existing walls and then to proportional reduction
-            // (with a warning), so an over-estimate only costs extra walls.
+            // between the objects growing loops on that layer (prioritized
+            // ones, or all objects when none is prioritized). Whatever is
+            // still missing at allocation time falls back to other objects'
+            // existing walls and then to proportional reduction (with a
+            // warning), so an over-estimate only costs extra walls.
             std::vector<float> demand(m_layers.size(), 0.f);
             {
                 std::vector<const PrintObject *> objects;
@@ -665,7 +673,10 @@ void PrintObject::make_perimeters()
                         const Layer *layer = object->get_layer_at_printz(z, EPSILON);
                         if (layer == nullptr)
                             continue;
-                        if (object->config().purge_into_inner_walls_preferred.getBool())
+                        // Split the demand between the objects that grow
+                        // loops (marked ones, or all objects when none is
+                        // marked).
+                        if (object->config().purge_into_inner_walls_preferred.getBool() || !any_preferred)
                             ++preferred_count;
                         for (const unsigned int filament : layer_filaments(layer)) {
                             if (prev_filament >= 0 && (int) filament != prev_filament)

@@ -8186,6 +8186,7 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Prioritize for purge into inner walls");
     def->tooltip = L("Prioritize this object as a target for purging into inner walls after filament changes: "
         "its inner walls are filled before other objects' and it receives extra inner wall loops for purge capacity. "
+        "If no object is prioritized, all objects receive extra inner wall loops. "
         "It will not take effect unless 'Purge into inner walls' is enabled.");
     def->set_default_value(new ConfigOptionBool(false));
 
