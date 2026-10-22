@@ -8259,23 +8259,6 @@ void PrintConfigDef::init_fff_params()
     // BBS: change data type to floats to add partplate logic
     def->set_default_value(new ConfigOptionFloats{ 220. });
 
-    // New purge-into-inner-walls options - replaces the prime tower
-    def = this->add("purge_into_inner_walls", coBool);
-    def->label = L("Purge into inner walls");
-    def->tooltip = L("Purge material after filament changes into inner wall loops instead of using a prime tower. "
-        "This replaces the prime tower and cannot be enabled with it. "
-        "Existing inner walls are used first. Extra walls are generated inward from the innermost wall only if needed.");
-    def->mode = comSimple;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = this->add("purge_inner_walls_max_extra_loops", coInt);
-    def->label = L("Max extra inner wall loops");
-    def->tooltip = L("Maximum number of extra inner wall loops that can be generated for purge material. "
-        "-1 means automatic until solid-equivalent.");
-    def->mode = comAdvanced;
-    def->min = -1;
-    def->set_default_value(new ConfigOptionInt(-1));
-
     def = this->add("prime_tower_width", coFloat);
     def->label = L("Width");
     def->tooltip = L("This is the width of prime towers.");
