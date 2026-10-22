@@ -602,7 +602,7 @@ void PrintObject::make_perimeters()
                 if (print_config.purge_into_inner_walls.getBool()) {
                     for (size_t region_id = 0; region_id < m_layers[layer_idx]->region_count(); ++region_id) {
                         LayerRegion* layerm = m_layers[layer_idx]->get_region(region_id);
-                        if (layerm) {
+                        if (layerm && layerm->layer()->object()->config().purge_into_inner_walls.getBool()) {
                             layerm->add_purge_extra_walls(print_config, layerm->layer()->object()->config());
                         }
                     }
