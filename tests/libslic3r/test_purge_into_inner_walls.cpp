@@ -114,6 +114,23 @@ TEST_CASE("PrintConfig purge_into_inner_walls option", "[PurgeIntoInnerWalls]")
     const ConfigOption* max_loops_opt = config.option("purge_inner_walls_max_extra_loops");
     REQUIRE(max_loops_opt != nullptr);
     REQUIRE(max_loops_opt->getInt() == -1);  // default is -1
+
+    // The feature toggles are global (PrintConfig) while the prioritization
+    // toggle is per-object (PrintObjectConfig). Declaring the same key in both
+    // classes would make FullPrintConfig register it twice (assert in
+    // StaticCacheBase::opt_add) and direct member access ambiguous.
+    REQUIRE(PrintConfig::defaults().has("purge_into_inner_walls"));
+    REQUIRE(PrintConfig::defaults().has("purge_inner_walls_max_extra_loops"));
+    REQUIRE_FALSE(PrintConfig::defaults().has("purge_into_inner_walls_preferred"));
+    REQUIRE_FALSE(PrintObjectConfig::defaults().has("purge_into_inner_walls"));
+    REQUIRE_FALSE(PrintObjectConfig::defaults().has("purge_inner_walls_max_extra_loops"));
+    REQUIRE(PrintObjectConfig::defaults().has("purge_into_inner_walls_preferred"));
+    REQUIRE(PrintObjectConfig::defaults().purge_into_inner_walls_preferred.getBool() == false);
+
+    const auto full_keys = FullPrintConfig::defaults().keys();
+    REQUIRE(std::count(full_keys.begin(), full_keys.end(), "purge_into_inner_walls") == 1);
+    REQUIRE(std::count(full_keys.begin(), full_keys.end(), "purge_inner_walls_max_extra_loops") == 1);
+    REQUIRE(std::count(full_keys.begin(), full_keys.end(), "purge_into_inner_walls_preferred") == 1);
 }
 
 // Test purge candidate priority ordering

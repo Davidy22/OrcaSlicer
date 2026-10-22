@@ -3575,13 +3575,14 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         int affected_layers = 0;
         int affected_transitions = 0;
         
-        // Re-sort objects to prioritize those with purge_into_inner_walls enabled
+        // Process objects prioritized for purge (purge_into_inner_walls_preferred) first;
+        // any remaining purge volume then flows into unmarked objects' inner walls.
         ConstPrintObjectPtrs purge_object_list = print.objects().vector();
         std::sort(purge_object_list.begin(), purge_object_list.end(), [purge_object_list](const PrintObject* a, const PrintObject* b) {
-            bool a_purge = a->config().purge_into_inner_walls.getBool();
-            bool b_purge = b->config().purge_into_inner_walls.getBool();
-            if (a_purge != b_purge) {
-                return a_purge;  // true comes before false
+            bool a_preferred = a->config().purge_into_inner_walls_preferred.getBool();
+            bool b_preferred = b->config().purge_into_inner_walls_preferred.getBool();
+            if (a_preferred != b_preferred) {
+                return a_preferred;  // true comes before false
             }
             return a->id() < b->id();
         });
@@ -3590,11 +3591,9 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         float total_existing_volume = 0.f;
         float total_extra_volume = 0.f;
         
-        // Process each object that has purge_into_inner_walls enabled
+        // Consume the purge volume from objects in priority order (all objects are
+        // eligible; consumption stops once the volume is exhausted)
         for (const PrintObject* object : purge_object_list) {
-            if (!object->config().purge_into_inner_walls.getBool())
-                continue;
-                
             const Layer* this_layer = object->get_layer_at_printz(lt.print_z, EPSILON);
             if (this_layer == nullptr)
                 continue;
@@ -3607,7 +3606,7 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                 const PrintObject* object;
                 unsigned int copy;
                 int priority;
-                bool is_purge_object;
+                bool is_preferred_object;
                 bool is_existing;
                 float volume;
             };
@@ -3620,15 +3619,15 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                         if (!coll || !coll->is_purge_inner_wall_candidate())
                             continue;
                             
-                        bool is_purge_obj = object->config().purge_into_inner_walls.getBool();
+                        bool is_preferred_obj = object->config().purge_into_inner_walls_preferred.getBool();
                         int priority = 0;
-                        if (is_purge_obj)
+                        if (is_preferred_obj)
                             priority += 10000;
                         if (coll->is_existing_purge_wall())
                             priority += 1000;
                         priority += coll->get_max_inset_idx();
                         
-                        candidates.push_back({coll, object, copy, priority, is_purge_obj, 
+                        candidates.push_back({coll, object, copy, priority, is_preferred_obj,
                                               coll->is_existing_purge_wall(), static_cast<float>(coll->total_volume())});
                       
                       if (coll->is_existing_purge_wall())
@@ -3640,8 +3639,8 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
             }
             
             std::sort(candidates.begin(), candidates.end(), [](const PurgeCandidate& a, const PurgeCandidate& b) {
-                if (a.is_purge_object != b.is_purge_object)
-                    return a.is_purge_object > b.is_purge_object;
+                if (a.is_preferred_object != b.is_preferred_object)
+                    return a.is_preferred_object > b.is_preferred_object;
                 if (a.priority != b.priority)
                     return a.priority > b.priority;
                 return a.volume > b.volume;
@@ -3658,13 +3657,15 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                 volume_to_wipe -= consumed;
                 purge_consumed += consumed;
             }
-            
-            if (volume_to_wipe > 0.f) {
-                max_shortfall = std::max(max_shortfall, volume_to_wipe);
-                affected_layers++;
-                affected_transitions++;
-            }
         }
+
+        // Whatever is left after all objects have been tried is this toolchange's shortfall
+        if (volume_to_wipe > 0.f) {
+            max_shortfall = volume_to_wipe;
+            affected_layers = 1;
+            affected_transitions = 1;
+        }
+
         // Update statistics
         stats.purge_inner_walls_requested_volume_mm3 += purge_consumed + max_shortfall;
         stats.purge_inner_walls_existing_volume_mm3 += total_existing_volume;

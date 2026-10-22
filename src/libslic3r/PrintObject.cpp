@@ -602,7 +602,7 @@ void PrintObject::make_perimeters()
                 if (print_config.purge_into_inner_walls.getBool()) {
                     for (size_t region_id = 0; region_id < m_layers[layer_idx]->region_count(); ++region_id) {
                         LayerRegion* layerm = m_layers[layer_idx]->get_region(region_id);
-                        if (layerm && layerm->layer()->object()->config().purge_into_inner_walls.getBool()) {
+                        if (layerm && layerm->layer()->object()->config().purge_into_inner_walls_preferred.getBool()) {
                             layerm->add_purge_extra_walls(print_config, layerm->layer()->object()->config());
                         }
                     }
@@ -1851,11 +1851,10 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "belt_purge_tower_object") {
             invalidated |= m_print->invalidate_step(psWipeTower);
             invalidated |= m_print->invalidate_step(psGCodeExport);
-        } else if (
-               opt_key == "purge_into_inner_walls"
-            || opt_key == "purge_inner_walls_max_extra_loops") {
-            // Purge into inner walls affects perimeters and wipe tower
-            // It changes wall geometry (tags existing walls) and purge allocation
+        } else if (opt_key == "purge_into_inner_walls_preferred") {
+            // Prioritized objects gain extra inner wall loops for purge capacity
+            // (perimeters) and are filled first during purge allocation (wipe tower step).
+            // The global purge keys are handled in Print::invalidate_state_by_config_options.
             steps.emplace_back(posPerimeters);
             invalidated |= m_print->invalidate_step(psWipeTower);
             invalidated |= m_print->invalidate_step(psGCodeExport);

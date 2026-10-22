@@ -1349,9 +1349,11 @@ PRINT_CONFIG_CLASS_DEFINE(
     // BBS
     ((ConfigOptionBool,                flush_into_infill))
     ((ConfigOptionBool,                flush_into_support))
-    // New purge-into-inner-walls options - replaces prime tower
-    ((ConfigOptionBool,                purge_into_inner_walls))
-    ((ConfigOptionInt,                 purge_inner_walls_max_extra_loops))
+    // Per-object prioritization toggle for the purge-into-inner-walls feature:
+    // objects with this set are used as purge targets first and receive extra
+    // inner wall loops for purge capacity. The global feature toggles
+    // (purge_into_inner_walls, purge_inner_walls_max_extra_loops) live in PrintConfig.
+    ((ConfigOptionBool,                purge_into_inner_walls_preferred))
     // Marker for the auto-generated belt purge prism; identifies the object to
     // the auto-manager (GUI) and the layer-grid alignment step (backend).
     ((ConfigOptionBool,                belt_purge_tower_object))
@@ -2076,7 +2078,9 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // BBS: change wipe_tower_x and wipe_tower_y data type to floats to add partplate logic
     ((ConfigOptionFloats,             wipe_tower_x))
     ((ConfigOptionFloats,             wipe_tower_y))
-    // New purge-into-inner-walls options - replaces prime tower
+    // Global purge-into-inner-walls options - replaces the prime tower.
+    // (The per-object prioritization toggle is purge_into_inner_walls_preferred
+    // in PrintObjectConfig.)
     ((ConfigOptionBool,               purge_into_inner_walls))
     ((ConfigOptionInt,                purge_inner_walls_max_extra_loops))
     ((ConfigOptionFloat,              prime_tower_width))

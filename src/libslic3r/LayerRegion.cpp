@@ -183,10 +183,10 @@ void LayerRegion::add_purge_extra_walls(const PrintConfig& print_config, const P
 {
     // Only add extra walls if:
     // 1. Global purge_into_inner_walls is enabled
-    // 2. This object has purge_into_inner_walls enabled (prioritized for purge)
+    // 2. This object is prioritized for purge (purge_into_inner_walls_preferred)
     if (!print_config.purge_into_inner_walls.getBool())
         return;
-    if (!object_config.purge_into_inner_walls.getBool())
+    if (!object_config.purge_into_inner_walls_preferred.getBool())
         return;
     
     // Need at least 1 wall loop to add extra walls

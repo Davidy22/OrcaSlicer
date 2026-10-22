@@ -8167,12 +8167,13 @@ void PrintConfigDef::init_fff_params()
     def->mode    = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
-    // New purge-into-inner-walls options - replaces the prime tower
+    // Global purge-into-inner-walls options - replaces the prime tower
     def = this->add("purge_into_inner_walls", coBool);
     def->label = L("Purge into inner walls");
     def->tooltip = L("Purge material after filament changes into inner wall loops instead of using a prime tower. "
         "This replaces the prime tower and cannot be enabled with it. "
-        "Existing inner walls are used first. Extra walls are generated inward from the innermost wall only if needed.");
+        "Existing inner walls are used first. Extra walls are generated inward from the innermost wall only if needed. "
+        "Objects marked with the per-object 'Prioritize for purge into inner walls' option are filled first and receive the extra wall loops.");
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -8183,6 +8184,15 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->min = -1;
     def->set_default_value(new ConfigOptionInt(-1));
+
+    // Per-object prioritization toggle for purge_into_inner_walls (see PrintObjectConfig)
+    def = this->add("purge_into_inner_walls_preferred", coBool);
+    def->category = L("Flush options");
+    def->label = L("Prioritize for purge into inner walls");
+    def->tooltip = L("Prioritize this object as a target for purging into inner walls after filament changes: "
+        "its inner walls are filled before other objects' and it receives extra inner wall loops for purge capacity. "
+        "It will not take effect unless 'Purge into inner walls' is enabled.");
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("flush_volumes_vector", coFloats);
     // BBS: remove _L()

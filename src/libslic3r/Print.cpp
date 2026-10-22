@@ -522,6 +522,16 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             osteps.emplace_back(posSimplifySupportPath);
             steps.emplace_back(psSkirtBrim);
         }
+        else if (
+               opt_key == "purge_into_inner_walls"
+            || opt_key == "purge_inner_walls_max_extra_loops") {
+            // Inner walls are tagged as purge candidates during perimeter generation
+            // (and prioritized objects gain extra wall loops); purge allocation
+            // happens in the wipe tower step. These are global (PrintConfig) keys,
+            // so they never show up in per-object config diffs.
+            osteps.emplace_back(posPerimeters);
+            steps.emplace_back(psWipeTower);
+        }
         else if (opt_key == "z_hop_types") {
             osteps.emplace_back(posDetectOverhangsForLift);
         }
