@@ -577,7 +577,9 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
             
             if (extrusion->is_closed) {
                 ExtrusionLoop extrusion_loop(std::move(paths), pg_extrusion.is_contour ? elrDefault : elrHole);
-                
+                if (perimeter_generator.print_config->purge_into_inner_walls)
+                    extrusion_loop.inset_idx = extrusion->inset_idx;
+
                 // ORCA: Purge into inner walls - tag inner walls (non-external) as purge candidates
                 if (extrusion->inset_idx > 0 && perimeter_generator.print_config->purge_into_inner_walls.getBool()) {
                     extrusion_loop.is_purge_inner_wall_candidate = true;

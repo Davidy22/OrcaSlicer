@@ -8173,7 +8173,8 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Purge material after filament changes into inner wall loops instead of using a prime tower. "
         "This replaces the prime tower and cannot be enabled with it. "
         "Existing inner walls are used first. Extra walls are generated inward from the innermost wall only if needed. "
-        "Objects marked with the per-object 'Prioritize for purge into inner walls' option are filled first and receive the extra wall loops.");
+        "Outer walls are never used for purging. Objects marked with the per-object 'Prioritize for purge into inner walls' option "
+        "are filled first and receive the extra wall loops. If no object is prioritized, all objects can receive extra loops.");
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -8188,6 +8189,7 @@ void PrintConfigDef::init_fff_params()
         "its inner walls are filled before other objects' and it receives extra inner wall loops for purge capacity. "
         "If no object is prioritized, all objects receive extra inner wall loops. "
         "It will not take effect unless 'Purge into inner walls' is enabled.");
+    def->mode = comSimple;
     def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("flush_volumes_vector", coFloats);

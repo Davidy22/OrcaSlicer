@@ -290,6 +290,7 @@ public:
         m_wiping_extrusions.set_layer_tools_ptr(this);
         return m_wiping_extrusions;
     }
+    const WipingExtrusions& wiping_extrusions() const { return m_wiping_extrusions; }
 
 private:
     // This object holds list of extrusion that will be used for extruder wiping

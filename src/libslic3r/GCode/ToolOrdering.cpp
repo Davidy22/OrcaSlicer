@@ -3394,12 +3394,10 @@ bool WipingExtrusions::is_overriddable(const ExtrusionEntityCollection& eec, con
     if (print_config.filament_soluble.get_at(m_layer_tools->extruder(eec, region)))
         return false;
 
-    // ORCA: Check for purge into inner walls mode
-    if (print_config.purge_into_inner_walls.getBool()) {
-        // Allow override if this collection contains purge inner wall candidates
-        if (eec.is_purge_inner_wall_candidate())
-            return true;
-    }
+    // This mode is strictly inner-wall-only, even if a saved project still
+    // has legacy flush_into_objects or flush_into_infill enabled.
+    if (print_config.purge_into_inner_walls)
+        return eec.is_purge_inner_wall_candidate();
 
     if (object.config().flush_into_objects)
         return true;
@@ -3413,7 +3411,7 @@ bool WipingExtrusions::is_overriddable(const ExtrusionEntityCollection& eec, con
 // BBS
 bool WipingExtrusions::is_support_overriddable(const ExtrusionRole role, const PrintObject& object) const
 {
-    if (!object.config().flush_into_support)
+    if (!object.config().flush_into_support || object.print()->config().purge_into_inner_walls)
         return false;
 
     if (role == erMixed) {
@@ -3444,129 +3442,6 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
     if (print.config().filament_is_support.get_at(old_extruder) || print.config().filament_is_support.get_at(new_extruder))
         return std::max(0.f, volume_to_wipe); // Support filament cannot be used to print support, infill, wipe_tower, etc.
 
-    // we will sort objects so that dedicated for wiping are at the beginning:
-    ConstPrintObjectPtrs object_list = print.objects().vector();
-    // BBS: fix the exception caused by not fixed order between different objects
-    std::sort(object_list.begin(), object_list.end(), [object_list](const PrintObject* a, const PrintObject* b) {
-        if (a->config().flush_into_objects != b->config().flush_into_objects) {
-            return a->config().flush_into_objects.getBool();
-        }
-        else {
-            return a->id() < b->id();
-        }
-    });
-
-    // We will now iterate through
-    //  - first the dedicated objects to mark perimeters or infills (depending on infill_first)
-    //  - second through the dedicated ones again to mark infills or perimeters (depending on infill_first)
-    //  - then all the others to mark infills (in case that !infill_first, we must also check that the perimeter is finished already
-    // this is controlled by the following variable:
-    bool perimeters_done = false;
-
-    for (int i=0 ; i<(int)object_list.size() + (perimeters_done ? 0 : 1); ++i) {
-        if (!perimeters_done && (i==(int)object_list.size() || !object_list[i]->config().flush_into_objects)) { // we passed the last dedicated object in list
-            perimeters_done = true;
-            i=-1;   // let's go from the start again
-            continue;
-        }
-
-        const PrintObject* object = object_list[i];
-
-        // Finds this layer:
-        const Layer* this_layer = object->get_layer_at_printz(lt.print_z, EPSILON);
-        if (this_layer == nullptr)
-        	continue;
-
-        size_t num_of_copies = object->instances().size();
-
-        // iterate through copies (aka PrintObject instances) first, so that we mark neighbouring infills to minimize travel moves
-        for (unsigned int copy = 0; copy < num_of_copies; ++copy) {
-            for (const LayerRegion *layerm : this_layer->regions()) {
-                const auto &region = layerm->region();
-
-                if (!object->config().flush_into_infill && !object->config().flush_into_objects && !object->config().flush_into_support)
-                    continue;
-                bool wipe_into_infill_only = !object->config().flush_into_objects && object->config().flush_into_infill;
-                bool is_infill_first = region.config().is_infill_first;
-                if (is_infill_first != perimeters_done || wipe_into_infill_only) {
-                    for (const ExtrusionEntity* ee : layerm->fills.entities) {                      // iterate through all infill Collections
-                        auto* fill = dynamic_cast<const ExtrusionEntityCollection*>(ee);
-
-                        if (!is_overriddable(*fill, print.config(), *object, region))
-                            continue;
-
-                        if (wipe_into_infill_only && ! is_infill_first)
-                            // In this case we must check that the original extruder is used on this layer before the one we are overridding
-                            // (and the perimeters will be finished before the infill is printed):
-                            if (!lt.is_extruder_order(lt.wall_extruder_id(region), new_extruder))
-                                continue;
-
-                        if ((!is_entity_overridden(fill, object, copy) && fill->total_volume() > min_infill_volume))
-                        {     // this infill will be used to wipe this extruder
-                            set_extruder_override(fill, object, copy, new_extruder, num_of_copies);
-                            if ((volume_to_wipe -= float(fill->total_volume())) <= 0.f)
-                            	// More material was purged already than asked for.
-	                            return 0.f;
-                        }
-                    }
-                }
-
-                // Now the same for perimeters - see comments above for explanation:
-                if (object->config().flush_into_objects && is_infill_first == perimeters_done)
-                {
-                    for (const ExtrusionEntity* ee : layerm->perimeters.entities) {
-                        auto* fill = dynamic_cast<const ExtrusionEntityCollection*>(ee);
-                        if (is_overriddable(*fill, print.config(), *object, region) && !is_entity_overridden(fill, object, copy) && fill->total_volume() > min_infill_volume) {
-                            set_extruder_override(fill, object, copy, new_extruder, num_of_copies);
-                            if ((volume_to_wipe -= float(fill->total_volume())) <= 0.f)
-                            	// More material was purged already than asked for.
-	                            return 0.f;
-                        }
-                    }
-                }
-            }
-
-            // BBS
-            if (object->config().flush_into_support) {
-                auto& object_config = object->config();
-                const SupportLayer* this_support_layer = object->get_support_layer_at_printz(lt.print_z, EPSILON);
-
-                do {
-                    if (this_support_layer == nullptr)
-                        break;
-
-                    bool support_overriddable = object_config.support_filament == 0;
-                    bool support_intf_overriddable = object_config.support_interface_filament == 0;
-                    if (!support_overriddable && !support_intf_overriddable)
-                        break;
-
-                    auto &entities = this_support_layer->support_fills.entities;
-                    if (support_overriddable && !is_support_overridden(object) && !(object_config.support_interface_not_for_body.value && !support_intf_overriddable &&(new_extruder==object_config.support_interface_filament-1||old_extruder==object_config.support_interface_filament-1))) {
-                        set_support_extruder_override(object, copy, new_extruder, num_of_copies);
-                        for (const ExtrusionEntity* ee : entities) {
-                            if (ee->role() == erSupportMaterial || ee->role() == erSupportTransition)
-                                volume_to_wipe -= ee->total_volume();
-
-                            if (volume_to_wipe <= 0.f)
-                                return 0.f;
-                        }
-                    }
-
-                    if (support_intf_overriddable && !is_support_interface_overridden(object)) {
-                        set_support_interface_extruder_override(object, copy, new_extruder, num_of_copies);
-                        for (const ExtrusionEntity* ee : entities) {
-                            if (ee->role() == erSupportMaterialInterface)
-                                volume_to_wipe -= ee->total_volume();
-
-                            if (volume_to_wipe <= 0.f)
-                                return 0.f;
-                        }
-                    }
-                } while (0);
-            }
-        }
-    }
-
     // ORCA: Purge into inner walls - handle purge mode separately
     // This replaces the prime tower; no tower fallback
     if (print.config().purge_into_inner_walls.getBool()) {
@@ -3592,10 +3467,7 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         // completely (no unprinted gaps), each color is short by the same
         // relative amount, and the shortfall is reported by
         // Print::_plan_purge_into_inner_walls(). Computed lazily on the
-        // layer's first toolchange, before any of its walls are overridden
-        // by this block (the standard phase above skips objects without
-        // flush_into_*; if those consumed candidates first, capacity is
-        // overestimated and the greedy consumption below stays safe).
+        // layer's first toolchange, before any of its walls are overridden.
         if (m_purge_layer_scale < 0.f) {
             float capacity = 0.f;
             for (const PrintObject* object : purge_object_list) {
@@ -3606,7 +3478,7 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                 for (const LayerRegion *layerm : this_layer->regions())
                     for (const ExtrusionEntity* ee : layerm->perimeters.entities) {
                         auto* coll = dynamic_cast<const ExtrusionEntityCollection*>(ee);
-                        if (coll && coll->is_purge_inner_wall_candidate())
+                        if (coll && is_overriddable(*coll, print.config(), *object, layerm->region()))
                             capacity += static_cast<float>(coll->total_volume()) * copies;
                     }
             }
@@ -3650,7 +3522,7 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                 for (const LayerRegion *layerm : this_layer->regions()) {
                     for (const ExtrusionEntity* ee : layerm->perimeters.entities) {
                         auto* coll = dynamic_cast<const ExtrusionEntityCollection*>(ee);
-                        if (!coll || !coll->is_purge_inner_wall_candidate())
+                        if (!coll || !is_overriddable(*coll, print.config(), *object, layerm->region()))
                             continue;
 
                         bool is_preferred_obj = object->config().purge_into_inner_walls_preferred.getBool();
@@ -3714,6 +3586,129 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         return shortfall;
     }
 
+    // we will sort objects so that dedicated for wiping are at the beginning:
+    ConstPrintObjectPtrs object_list = print.objects().vector();
+    // BBS: fix the exception caused by not fixed order between different objects
+    std::sort(object_list.begin(), object_list.end(), [object_list](const PrintObject* a, const PrintObject* b) {
+        if (a->config().flush_into_objects != b->config().flush_into_objects) {
+            return a->config().flush_into_objects.getBool();
+        }
+        else {
+            return a->id() < b->id();
+        }
+    });
+
+    // We will now iterate through
+    //  - first the dedicated objects to mark perimeters or infills (depending on infill_first)
+    //  - second through the dedicated ones again to mark infills or perimeters (depending on infill_first)
+    //  - then all the others to mark infills (in case that !infill_first, we must also check that the perimeter is finished already
+    // this is controlled by the following variable:
+    bool perimeters_done = false;
+
+    for (int i=0 ; i<(int)object_list.size() + (perimeters_done ? 0 : 1); ++i) {
+        if (!perimeters_done && (i==(int)object_list.size() || !object_list[i]->config().flush_into_objects)) { // we passed the last dedicated object in list
+            perimeters_done = true;
+            i=-1;   // let's go from the start again
+            continue;
+        }
+
+        const PrintObject* object = object_list[i];
+
+        // Finds this layer:
+        const Layer* this_layer = object->get_layer_at_printz(lt.print_z, EPSILON);
+        if (this_layer == nullptr)
+            continue;
+
+        size_t num_of_copies = object->instances().size();
+
+        // iterate through copies (aka PrintObject instances) first, so that we mark neighbouring infills to minimize travel moves
+        for (unsigned int copy = 0; copy < num_of_copies; ++copy) {
+            for (const LayerRegion *layerm : this_layer->regions()) {
+                const auto &region = layerm->region();
+
+                if (!object->config().flush_into_infill && !object->config().flush_into_objects && !object->config().flush_into_support)
+                    continue;
+                bool wipe_into_infill_only = !object->config().flush_into_objects && object->config().flush_into_infill;
+                bool is_infill_first = region.config().is_infill_first;
+                if (is_infill_first != perimeters_done || wipe_into_infill_only) {
+                    for (const ExtrusionEntity* ee : layerm->fills.entities) {                      // iterate through all infill Collections
+                        auto* fill = dynamic_cast<const ExtrusionEntityCollection*>(ee);
+
+                        if (!is_overriddable(*fill, print.config(), *object, region))
+                            continue;
+
+                        if (wipe_into_infill_only && ! is_infill_first)
+                            // In this case we must check that the original extruder is used on this layer before the one we are overridding
+                            // (and the perimeters will be finished before the infill is printed):
+                            if (!lt.is_extruder_order(lt.wall_extruder_id(region), new_extruder))
+                                continue;
+
+                        if ((!is_entity_overridden(fill, object, copy) && fill->total_volume() > min_infill_volume))
+                        {     // this infill will be used to wipe this extruder
+                            set_extruder_override(fill, object, copy, new_extruder, num_of_copies);
+                            if ((volume_to_wipe -= float(fill->total_volume())) <= 0.f)
+                                // More material was purged already than asked for.
+                                return 0.f;
+                        }
+                    }
+                }
+
+                // Now the same for perimeters - see comments above for explanation:
+                if (object->config().flush_into_objects && is_infill_first == perimeters_done)
+                {
+                    for (const ExtrusionEntity* ee : layerm->perimeters.entities) {
+                        auto* fill = dynamic_cast<const ExtrusionEntityCollection*>(ee);
+                        if (is_overriddable(*fill, print.config(), *object, region) && !is_entity_overridden(fill, object, copy) && fill->total_volume() > min_infill_volume) {
+                            set_extruder_override(fill, object, copy, new_extruder, num_of_copies);
+                            if ((volume_to_wipe -= float(fill->total_volume())) <= 0.f)
+                                // More material was purged already than asked for.
+                                return 0.f;
+                        }
+                    }
+                }
+            }
+
+            // BBS
+            if (object->config().flush_into_support) {
+                auto& object_config = object->config();
+                const SupportLayer* this_support_layer = object->get_support_layer_at_printz(lt.print_z, EPSILON);
+
+                do {
+                    if (this_support_layer == nullptr)
+                        break;
+
+                    bool support_overriddable = object_config.support_filament == 0;
+                    bool support_intf_overriddable = object_config.support_interface_filament == 0;
+                    if (!support_overriddable && !support_intf_overriddable)
+                        break;
+
+                    auto &entities = this_support_layer->support_fills.entities;
+                    if (support_overriddable && !is_support_overridden(object) && !(object_config.support_interface_not_for_body.value && !support_intf_overriddable &&(new_extruder==object_config.support_interface_filament-1||old_extruder==object_config.support_interface_filament-1))) {
+                        set_support_extruder_override(object, copy, new_extruder, num_of_copies);
+                        for (const ExtrusionEntity* ee : entities) {
+                            if (ee->role() == erSupportMaterial || ee->role() == erSupportTransition)
+                                volume_to_wipe -= ee->total_volume();
+
+                            if (volume_to_wipe <= 0.f)
+                                return 0.f;
+                        }
+                    }
+
+                    if (support_intf_overriddable && !is_support_interface_overridden(object)) {
+                        set_support_interface_extruder_override(object, copy, new_extruder, num_of_copies);
+                        for (const ExtrusionEntity* ee : entities) {
+                            if (ee->role() == erSupportMaterialInterface)
+                                volume_to_wipe -= ee->total_volume();
+
+                            if (volume_to_wipe <= 0.f)
+                                return 0.f;
+                        }
+                    }
+                } while (0);
+            }
+        }
+    }
+
     // Some purge remains to be done on the Wipe Tower.
     assert(volume_to_wipe > 0.);
     return volume_to_wipe;
@@ -3726,6 +3721,11 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
 // them again and make sure we override it.
 void WipingExtrusions::ensure_perimeters_infills_order(const Print& print)
 {
+    // Unlike dedicated flush objects, purge targets keep all unclaimed
+    // geometry on its normal filament. Never force-override their outer walls.
+    if (print.config().purge_into_inner_walls)
+        return;
+
 	if (! this->something_overridable)
 		return;
 

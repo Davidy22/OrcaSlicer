@@ -171,6 +171,12 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     else
         g.process_classic();
 
+    // Both wall generators bundle an island's outer and inner walls together.
+    // WipingExtrusions overrides whole collections, so give each wall its own
+    // collection before measuring capacity or assigning purge extruders.
+    if (print_config.purge_into_inner_walls && !print_config.spiral_mode && print_config.print_sequence != PrintSequence::ByObject)
+        this->perimeters.split_purge_inner_walls();
+
     // ORCA: Purge into inner walls capacity planning is driven by
     // PrintObject::make_perimeters(): it measures the purge candidate volume
     // of the perimeters generated here and regenerates layers that need

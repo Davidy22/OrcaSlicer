@@ -7,14 +7,37 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/Polyline.hpp"
+#include "libslic3r/libslic3r.h"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 
 #include <vector>
 #include <algorithm>
+#include <cstddef>
+#include <utility>
 
 using namespace Slic3r;
+
+namespace {
+ExtrusionLoop purge_test_loop(ExtrusionRole role, int inset, bool generated = false)
+{
+    ExtrusionPath path(role);
+    path.mm3_per_mm = 0.1;
+    path.width = 0.4f;
+    path.height = 0.2f;
+    path.inset_idx = inset;
+    path.polyline = Polyline3(Polyline(Points{Point(0, 0), Point(scale_(10.), 0),
+                                             Point(scale_(10.), scale_(10.)), Point(0, scale_(10.)), Point(0, 0)}));
+    ExtrusionLoop loop(std::move(path));
+    loop.inset_idx = inset;
+    loop.is_purge_inner_wall_candidate = inset > 0;
+    loop.generated_for_purge = generated;
+    return loop;
+}
+} // namespace
 
 // Test that ExtrusionLoop purge metadata is properly set
 TEST_CASE("ExtrusionLoop purge metadata", "[PurgeIntoInnerWalls]")
@@ -61,6 +84,7 @@ TEST_CASE("ExtrusionEntityCollection purge candidate detection", "[PurgeIntoInne
     path.mm3_per_mm = 1.0;
     path.width = 0.4f;
     path.height = 0.2f;
+    path.polyline = purge_test_loop(erPerimeter, 2).paths.front().polyline;
     paths.push_back(std::move(path));
     
     ExtrusionLoop loop(std::move(paths), elrDefault);
@@ -81,6 +105,7 @@ TEST_CASE("ExtrusionEntityCollection purge candidate detection", "[PurgeIntoInne
     path2.mm3_per_mm = 1.0;
     path2.width = 0.4f;
     path2.height = 0.2f;
+    path2.polyline = purge_test_loop(erPerimeter, 3).paths.front().polyline;
     paths2.push_back(std::move(path2));
     
     ExtrusionLoop loop2(std::move(paths2), elrDefault);
@@ -98,6 +123,82 @@ TEST_CASE("ExtrusionEntityCollection purge candidate detection", "[PurgeIntoInne
     // Test volume calculation
     double volume = coll.total_volume();
     REQUIRE(volume > 0);
+}
+
+TEST_CASE("A mixed outer and inner wall collection is not a purge target", "[PurgeIntoInnerWalls][Regression]")
+{
+    ExtrusionEntityCollection island;
+    island.append(purge_test_loop(erExternalPerimeter, 0));
+    island.append(purge_test_loop(erPerimeter, 1));
+    REQUIRE_FALSE(island.is_purge_inner_wall_candidate());
+
+    ExtrusionEntityCollection nested;
+    nested.append(std::move(island));
+    REQUIRE_FALSE(nested.is_purge_inner_wall_candidate());
+}
+
+TEST_CASE("Purge target validation rejects visible walls even with an incorrect tag", "[PurgeIntoInnerWalls][Regression]")
+{
+    const ExtrusionRole role = GENERATE(erExternalPerimeter, erOverhangPerimeter, erGapFill, erTopSolidInfill);
+    const int inset = GENERATE(0, 1);
+    CAPTURE(role, inset);
+    ExtrusionLoop loop = purge_test_loop(role, inset);
+    loop.is_purge_inner_wall_candidate = true;
+    ExtrusionEntityCollection collection;
+    collection.append(std::move(loop));
+    // Only an overhang belonging to an inner wall is eligible; external
+    // overhangs share its role but have inset 0 and must stay protected.
+    const bool eligible = role == erOverhangPerimeter && inset > 0;
+    CHECK(collection.is_purge_inner_wall_candidate() == eligible);
+}
+
+TEST_CASE("Splitting purge walls preserves geometry and isolates outer walls", "[PurgeIntoInnerWalls][Regression]")
+{
+    ExtrusionEntityCollection island;
+    island.append(purge_test_loop(erPerimeter, 2, true));
+    island.append(purge_test_loop(erExternalPerimeter, 0));
+    ExtrusionEntityCollection nested;
+    nested.append(purge_test_loop(erPerimeter, 1));
+    nested.append(purge_test_loop(erOverhangPerimeter, 0)); // outer overhang
+    island.append(std::move(nested));
+    // Arachne can also emit open paths: these are not tagged purge loops.
+    island.append(purge_test_loop(erGapFill, 0).paths.front());
+
+    ExtrusionEntityCollection perimeters;
+    perimeters.append(std::move(island));
+    const auto &original_island = static_cast<const ExtrusionEntityCollection &>(*perimeters.entities.front());
+    const auto &original_nested = static_cast<const ExtrusionEntityCollection &>(*original_island.entities[2]);
+    const std::vector<const ExtrusionEntity *> original_walls{
+        original_island.entities[0], original_island.entities[1], original_nested.entities[0],
+        original_nested.entities[1], original_island.entities[3]};
+    const double original_volume = perimeters.total_volume();
+    const double inner_volume = original_walls[0]->total_volume() + original_walls[2]->total_volume();
+
+    // A second split is harmless and keeps the same entity identities.
+    for (int pass = 0; pass < 2; ++pass) {
+        CAPTURE(pass);
+        perimeters.split_purge_inner_walls();
+        REQUIRE(perimeters.size() == original_walls.size());
+        double capacity = 0.;
+        for (size_t i = 0; i < original_walls.size(); ++i) {
+            const auto *wall = dynamic_cast<const ExtrusionEntityCollection *>(perimeters.entities[i]);
+            REQUIRE(wall != nullptr);
+            REQUIRE(wall->size() == 1);
+            CHECK(wall->entities.front() == original_walls[i]);
+            const bool eligible = i == 0 || i == 2;
+            CHECK(wall->is_purge_inner_wall_candidate() == eligible);
+            if (wall->is_purge_inner_wall_candidate())
+                capacity += wall->total_volume();
+        }
+        CHECK_THAT(capacity, Catch::Matchers::WithinAbs(inner_volume, 1e-6));
+        CHECK_THAT(perimeters.total_volume(), Catch::Matchers::WithinAbs(original_volume, 1e-6));
+    }
+    const auto &extra_wall = static_cast<const ExtrusionEntityCollection &>(*perimeters.entities[0]);
+    CHECK_FALSE(extra_wall.is_existing_purge_wall());
+    CHECK(extra_wall.get_max_inset_idx() == 2);
+    const auto &existing_wall = static_cast<const ExtrusionEntityCollection &>(*perimeters.entities[2]);
+    CHECK(existing_wall.is_existing_purge_wall());
+    CHECK(existing_wall.get_max_inset_idx() == 1);
 }
 
 // Test that PrintConfig has purge_into_inner_walls option
@@ -120,7 +221,7 @@ TEST_CASE("PrintConfig purge_into_inner_walls option", "[PurgeIntoInnerWalls]")
     // classes would make FullPrintConfig register it twice (assert in
     // StaticCacheBase::opt_add) and direct member access ambiguous.
     REQUIRE(PrintConfig::defaults().has("purge_into_inner_walls"));
-    REQUIRE_FALSE(PrintConfig::defaults().has("purge_inner_walls_preferred"));
+    REQUIRE_FALSE(PrintConfig::defaults().has("purge_into_inner_walls_preferred"));
     REQUIRE_FALSE(PrintConfig::defaults().has("purge_inner_walls_max_extra_loops"));
     REQUIRE_FALSE(PrintObjectConfig::defaults().has("purge_into_inner_walls"));
     REQUIRE_FALSE(PrintObjectConfig::defaults().has("purge_inner_walls_max_extra_loops"));

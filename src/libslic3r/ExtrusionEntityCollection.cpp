@@ -8,6 +8,8 @@
 #include <cstddef>
 #include <limits>
 #include <map>
+#include <memory>
+#include <utility>
 
 namespace Slic3r {
 
@@ -158,25 +160,52 @@ double ExtrusionEntityCollection::min_mm3_per_mm() const
     return min_mm3_per_mm;
 }
 
-// ORCA: Purge into inner walls - check if this collection contains purge inner wall candidates
+// Fail closed: an override must never recolor an external wall, a thin wall,
+// gap fill or an untagged path sharing a collection with a purge candidate.
 bool ExtrusionEntityCollection::is_purge_inner_wall_candidate() const
 {
-    for (const auto& entity : this->entities) {
-        if (entity->is_loop()) {
-            const ExtrusionLoop* loop = static_cast<const ExtrusionLoop*>(entity);
-            if (loop->is_purge_inner_wall_candidate)
-                return true;
-        }
-    }
-    return false;
+    return !entities.empty() && std::all_of(entities.begin(), entities.end(), [](const ExtrusionEntity *entity) {
+        if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity))
+            return collection->is_purge_inner_wall_candidate();
+        const auto *loop = dynamic_cast<const ExtrusionLoop *>(entity);
+        return loop != nullptr && loop->is_purge_inner_wall_candidate && loop->inset_idx > 0 && !loop->paths.empty() &&
+               std::all_of(loop->paths.begin(), loop->paths.end(), [](const ExtrusionPath &path) {
+                   return path.role() == erPerimeter || path.role() == erOverhangPerimeter;
+               });
+    });
 }
 
-// Check if this collection represents existing (non-generated) purge walls
+void ExtrusionEntityCollection::split_purge_inner_walls()
+{
+    ExtrusionEntityCollection separated;
+    // Move, rather than clone, the leaves so the allocator, seam placer and
+    // G-code writer all see the same wall entities. Depth-first traversal
+    // preserves the generators' ordering, including deferred overhang loops.
+    const auto separate = [&separated](auto &&self, std::unique_ptr<ExtrusionEntity> entity) -> void {
+        if (auto *collection = dynamic_cast<ExtrusionEntityCollection *>(entity.get())) {
+            for (ExtrusionEntity *&child : collection->entities)
+                self(self, std::unique_ptr<ExtrusionEntity>(std::exchange(child, nullptr)));
+        } else {
+            auto wall = std::make_unique<ExtrusionEntityCollection>();
+            wall->entities.emplace_back(entity.get());
+            entity.release();
+            separated.entities.emplace_back(wall.get());
+            wall.release();
+        }
+    };
+    for (ExtrusionEntity *&entity : entities)
+        separate(separate, std::unique_ptr<ExtrusionEntity>(std::exchange(entity, nullptr)));
+    entities.swap(separated.entities);
+}
+
+// Check if this collection contains existing (non-generated) purge walls.
 bool ExtrusionEntityCollection::is_existing_purge_wall() const
 {
-    for (const auto& entity : this->entities) {
-        if (entity->is_loop()) {
-            const ExtrusionLoop* loop = static_cast<const ExtrusionLoop*>(entity);
+    for (const ExtrusionEntity *entity : entities) {
+        if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity)) {
+            if (collection->is_existing_purge_wall())
+                return true;
+        } else if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(entity)) {
             if (loop->is_purge_inner_wall_candidate && !loop->generated_for_purge)
                 return true;
         }
@@ -184,21 +213,15 @@ bool ExtrusionEntityCollection::is_existing_purge_wall() const
     return false;
 }
 
-// Get the maximum inset_idx among loops in this collection
 int ExtrusionEntityCollection::get_max_inset_idx() const
 {
     int max_idx = -1;
-    for (const auto& entity : this->entities) {
-        if (entity->is_loop()) {
-            const ExtrusionLoop* loop = static_cast<const ExtrusionLoop*>(entity);
-            if (loop->is_purge_inner_wall_candidate) {
-                // Find max inset_idx in this loop's paths
-                for (const ExtrusionPath& path : loop->paths) {
-                    if (path.inset_idx > max_idx)
-                        max_idx = path.inset_idx;
-                }
-            }
-        }
+    for (const ExtrusionEntity *entity : entities) {
+        if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity))
+            max_idx = std::max(max_idx, collection->get_max_inset_idx());
+        else if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(entity))
+            if (loop->is_purge_inner_wall_candidate)
+                max_idx = std::max(max_idx, loop->inset_idx);
     }
     return max_idx;
 }

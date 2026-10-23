@@ -150,8 +150,12 @@ public:
     double min_mm3_per_mm() const override;
     double total_volume() const override { double volume=0.; for (const auto& ent : entities) volume+=ent->total_volume(); return volume; }
 
-    // ORCA: Purge into inner walls - check if this collection contains purge inner wall candidates
+    // Purge overrides apply to whole collections: every entity must be a
+    // tagged inner wall, never an outer wall bundled with an inner one.
     bool is_purge_inner_wall_candidate() const;
+    // Split perimeter islands into individually overridable wall collections,
+    // preserving the wall entities, their metadata and their emission order.
+    void split_purge_inner_walls();
     bool is_existing_purge_wall() const;
     int get_max_inset_idx() const;
 

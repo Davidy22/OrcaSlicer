@@ -2021,9 +2021,12 @@ bool PrintObject::invalidate_state_by_config_options(
             invalidated |= m_print->invalidate_step(psWipeTower);
             invalidated |= m_print->invalidate_step(psGCodeExport);
         } else if (opt_key == "purge_into_inner_walls_preferred") {
-            // Prioritized objects gain extra inner wall loops for purge capacity
-            // (perimeters) and are filled first during purge allocation (wipe tower step).
-            // The global purge keys are handled in Print::invalidate_state_by_config_options.
+            // Changing the preferred targets redistributes purge demand and
+            // may enable/disable the all-objects growth fallback, so regenerate
+            // every object's walls, not just the checkbox's owner.
+            for (PrintObject *object : m_print->objects())
+                if (object != this)
+                    invalidated |= object->invalidate_step(posPerimeters);
             steps.emplace_back(posPerimeters);
             invalidated |= m_print->invalidate_step(psWipeTower);
             invalidated |= m_print->invalidate_step(psGCodeExport);
