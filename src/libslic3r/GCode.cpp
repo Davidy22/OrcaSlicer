@@ -6946,14 +6946,39 @@ LayerResult GCode::process_layer(
                     support_filaments[{ &support_layer, erSupportMaterialInterface }] =
                         single_extruder ? (has_support ? support_extruder : interface_extruder) : interface_extruder;
                 }
-                // Assign an extruder to the base.
-                ObjectByExtruder &obj = object_by_extruder(by_extruder, has_support ? support_extruder : interface_extruder, &layer_to_print - layers.data(), layers.size());
-                obj.support = &support_layer.support_fills;
-                obj.support_extrusion_role = single_extruder ? erMixed : erSupportMaterial;
-                if (! single_extruder && has_interface) {
-                    ObjectByExtruder &obj_interface = object_by_extruder(by_extruder, interface_extruder, &layer_to_print - layers.data(), layers.size());
-                    obj_interface.support = &support_layer.support_fills;
-                    obj_interface.support_extrusion_role = erSupportMaterialInterface;
+                std::set<unsigned int> purge_support_tools;
+                if (print.config().purge_into_inner_walls)
+                    for_each_extrusion_leaf(support_layer.support_fills, [&](const ExtrusionEntity &entity) {
+                        for (size_t copy = 0; copy < object.instances().size(); ++copy) {
+                            const int tool = wiping_extrusions.get_extruder_override(&entity, &object, copy);
+                            if (tool >= 0)
+                                purge_support_tools.insert(unsigned(tool));
+                        }
+                    });
+                if (!purge_support_tools.empty()) {
+                    // Keep native tools too: unclaimed paths and protected
+                    // interfaces must still print, once, on every copy.
+                    const unsigned int body_tool = has_support ? support_extruder : interface_extruder;
+                    const unsigned int interface_tool = has_interface ? interface_extruder : body_tool;
+                    purge_support_tools.insert(body_tool);
+                    if (has_interface)
+                        purge_support_tools.insert(interface_tool);
+                    for (const unsigned int tool : purge_support_tools) {
+                        ObjectByExtruder &group = object_by_extruder(by_extruder, tool, &layer_to_print - layers.data(), layers.size());
+                        group.support = &support_layer.support_fills;
+                        group.support_extrusion_role = erMixed;
+                        group.support_purge_extruders = std::make_pair(body_tool, interface_tool);
+                    }
+                } else {
+                    // Assign an extruder to the base.
+                    ObjectByExtruder &obj = object_by_extruder(by_extruder, has_support ? support_extruder : interface_extruder, &layer_to_print - layers.data(), layers.size());
+                    obj.support = &support_layer.support_fills;
+                    obj.support_extrusion_role = single_extruder ? erMixed : erSupportMaterial;
+                    if (! single_extruder && has_interface) {
+                        ObjectByExtruder &obj_interface = object_by_extruder(by_extruder, interface_extruder, &layer_to_print - layers.data(), layers.size());
+                        obj_interface.support = &support_layer.support_fills;
+                        obj_interface.support_extrusion_role = erSupportMaterialInterface;
+                    }
                 }
             }
         }
@@ -7535,7 +7560,10 @@ LayerResult GCode::process_layer(
 
                     ExtrusionRole support_extrusion_role = instance_to_print.object_by_extruder.support_extrusion_role;
                     bool is_overridden = support_extrusion_role == erSupportMaterialInterface ? support_intf_overridden : support_overridden;
-                    if (is_overridden == (print_wipe_extrusions != 0)) {
+                    if (instance_to_print.object_by_extruder.support_purge_extruders) {
+                        gcode += this->extrude_purge_support(instance_to_print.object_by_extruder, wiping_extrusions,
+                            *layer_to_print.original_object, instance_to_print.instance_id, extruder_id, print_wipe_extrusions != 0);
+                    } else if (is_overridden == (print_wipe_extrusions != 0)) {
                         gcode += this->extrude_support(
                             // support_extrusion_role is erSupportMaterial, erSupportTransition, erSupportMaterialInterface or erMixed for all extrusion paths.
                             *instance_to_print.object_by_extruder.support, support_extrusion_role);
@@ -7934,11 +7962,16 @@ LayerResult GCode::process_layer(
                         m_nominal_z = obj_sub_z;
                         m_need_change_layer_lift_z = true;
                     }
-                    ExtrusionRole support_role = instance_to_print.object_by_extruder.support_extrusion_role;
-                    gcode += this->extrude_support(*instance_to_print.object_by_extruder.support, support_role);
-                    // Make sure ironing is the last (Orca names this role erIroning, not erSupportIroning).
-                    if (support_role == erMixed || support_role == erSupportMaterialInterface)
-                        gcode += this->extrude_support(*instance_to_print.object_by_extruder.support, erIroning);
+                    if (instance_to_print.object_by_extruder.support_purge_extruders) {
+                        gcode += this->extrude_purge_support(instance_to_print.object_by_extruder, layer_tools.wiping_extrusions(),
+                            *layers[instance_to_print.layer_id].original_object, instance_to_print.instance_id, extruder_id, false);
+                    } else {
+                        ExtrusionRole support_role = instance_to_print.object_by_extruder.support_extrusion_role;
+                        gcode += this->extrude_support(*instance_to_print.object_by_extruder.support, support_role);
+                        // Make sure ironing is the last (Orca names this role erIroning, not erSupportIroning).
+                        if (support_role == erMixed || support_role == erSupportMaterialInterface)
+                            gcode += this->extrude_support(*instance_to_print.object_by_extruder.support, erIroning);
+                    }
                 }
 
                 // --- Shared instance footer (mirrors Orca's main instance loop) ---
@@ -8807,6 +8840,47 @@ std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectBy
     return gcode;
 }
 
+std::string GCode::extrude_purge_support(const ObjectByExtruder &support, const WipingExtrusions &wiping,
+                                       const PrintObject &object, size_t copy_id, unsigned int extruder_id, bool purge_pass)
+{
+    const auto [body_tool, interface_tool] = *support.support_purge_extruders;
+    // Select using ORIGINAL leaf identities before chaining. Chaining may clone
+    // reversed paths/collections, which no longer have keys in the override map.
+    // Preserve no_sort groups so support outline/fill order is not flattened.
+    const auto select = [&](auto &&self, const ExtrusionEntityCollection &source, bool ironing_only) -> ExtrusionEntityCollection {
+        ExtrusionEntityCollection selected;
+        selected.no_sort = source.no_sort;
+        if (!source.can_reverse())
+            selected.set_reverse();
+        for (const ExtrusionEntity *entity : source.entities) {
+            if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity)) {
+                ExtrusionEntityCollection child = self(self, *collection, ironing_only);
+                if (!child.empty())
+                    selected.append(std::move(child));
+            } else {
+                if ((entity->role() == erIroning) != ironing_only)
+                    continue;
+                const int override = wiping.get_extruder_override(entity, &object, copy_id);
+                const bool is_interface = entity->role() == erSupportMaterialInterface || entity->role() == erIroning;
+                const unsigned int tool = override >= 0 ? unsigned(override) : (is_interface ? interface_tool : body_tool);
+                if (tool == extruder_id && (override >= 0) == purge_pass)
+                    selected.append(*entity);
+            }
+        }
+        return selected;
+    };
+    ExtrusionEntityCollection selected = select(select, *support.support, false);
+    std::string gcode = this->extrude_support(selected, erMixed);
+    if (!purge_pass) {
+        // Partition first: a mixed-role parent must not hide nested ironing
+        // from extrude_support's role-specific finishing pass.
+        selected.clear();
+        const ExtrusionEntityCollection ironing = select(select, *support.support, true);
+        gcode += this->extrude_support(ironing, erIroning);
+    }
+    return gcode;
+}
+
 std::string GCode::extrude_support(const ExtrusionEntityCollection &support_fills, const ExtrusionRole support_extrusion_role)
 {
     static constexpr const char* support_label            = "support material";
@@ -8853,7 +8927,7 @@ std::string GCode::extrude_support(const ExtrusionEntityCollection &support_fill
 
         for (const ExtrusionEntity *ee : extrusions) {
             ExtrusionRole role = ee->role();
-            assert(is_support(role) || role == erIroning);
+            assert(ee->is_collection() || is_support(role) || role == erIroning);
 
             const char* label = (role == erSupportMaterial) ? support_label :
                 ((role == erSupportMaterialInterface) ? support_interface_label : 

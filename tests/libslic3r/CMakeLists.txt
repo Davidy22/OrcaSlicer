@@ -34,6 +34,7 @@ add_executable(${_TEST_NAME}_tests
     test_preset_setting_id.cpp
     test_preset_diff.cpp
     test_purge_into_inner_walls.cpp
+    test_purge_support.cpp
     test_vendor_cache.cpp
     test_preset_options.cpp
     test_edge_grid.cpp

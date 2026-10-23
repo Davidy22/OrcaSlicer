@@ -8173,8 +8173,11 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Purge material after filament changes into inner wall loops instead of using a prime tower. "
         "This replaces the prime tower and cannot be enabled with it. "
         "Existing inner walls are used first. Extra walls are generated inward from the innermost wall only if needed. "
-        "Outer walls are never used for purging. Objects marked with the per-object 'Prioritize for purge into inner walls' option "
-        "are filled first and receive the extra wall loops. If no object is prioritized, all objects can receive extra loops.");
+        "Model outer walls are never used for purging. Objects marked with the per-object 'Prioritize for purge into inner walls' option "
+        "are filled first and receive the extra wall loops. If no object is prioritized, all objects can receive extra loops. "
+        "If model inner walls cannot absorb the full purge volume, support walls and fill are used next, including outer support walls. "
+        "Support wall loops are increased only for the remaining demand, until it fits or the support is solid. "
+        "Soluble and dedicated support filaments are not used for purging.");
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionBool(false));
 

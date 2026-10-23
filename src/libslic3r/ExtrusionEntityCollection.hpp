@@ -184,6 +184,18 @@ private:
     bool is_reverse{true};
 };
 
+// Visits allocation units without copying them. A loop or multi-path stays a
+// single unit; collections are only grouping, not whole-support overrides.
+template<typename F> void for_each_extrusion_leaf(const ExtrusionEntity &entity, F &&f)
+{
+    if (auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(&entity)) {
+        for (const ExtrusionEntity *child : collection->entities)
+            for_each_extrusion_leaf(*child, f);
+    } else {
+        f(entity);
+    }
+}
+
 // Calls `f` for every ExtrusionPath in `entity`, descending into collections, loops and multi-paths.
 template<typename F> void for_each_extrusion_path(const ExtrusionEntity &entity, F &&f)
 {

@@ -485,6 +485,8 @@ set(lisbslic3r_sources
     Slicing.hpp
     Support/BeltFloorContext.cpp
     Support/BeltFloorContext.hpp
+    Support/PurgeSupport.cpp
+    Support/PurgeSupport.hpp
     Support/SupportCommon.cpp
     Support/SupportCommon.hpp
     Support/SupportLayer.hpp

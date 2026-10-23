@@ -56,8 +56,8 @@ void init_purge_print(Print &print, Model &model, const DynamicPrintConfig &conf
     // be matched to their object's intended filament, not just counted.
     TriangleMesh first = make_cube(20., 20., 1.);
     TriangleMesh second = make_cube(20., 20., 1.);
-    first.translate(Vec3d(40., 40., 0.));
-    second.translate(Vec3d(80., 40., 0.));
+    first.translate(40.f, 40.f, 0.f);
+    second.translate(80.f, 40.f, 0.f);
     const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
         {{"extruder", 1}, {"purge_into_inner_walls_preferred", prefer_first}},
         {{"extruder", 2}},

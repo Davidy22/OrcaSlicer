@@ -7,6 +7,7 @@
 #include "libslic3r.h"
 #include "BoundingBox.hpp"
 #include "Flow.hpp"
+#include "Support/PurgeSupport.hpp"
 #include "SurfaceCollection.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include <vector>
@@ -331,6 +332,8 @@ public:
     ExPolygons                  support_islands;
     // Extrusion paths for the support base and for the support interface and contacts.
     ExtrusionEntityCollection   support_fills;
+    // Runtime-only support wall growth, registered only in inner-wall purge mode.
+    std::vector<PurgeSupportRegion> purge_support_regions;
     SupportInnerType            support_type = stInnerNormal;
 
     // for tree supports

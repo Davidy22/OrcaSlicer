@@ -30,6 +30,7 @@
 #include <ostream>
 #include "ExPolygon.hpp"
 #include "Layer.hpp"
+#include "Support/PurgeSupport.hpp"
 #include "FilamentGroup.hpp"
 #include <memory>
 #include "FilamentGroupUtils.hpp"
@@ -528,6 +529,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             // happens in the wipe tower step. This is a global (PrintConfig) key,
             // so it never shows up in per-object config diffs.
             osteps.emplace_back(posPerimeters);
+            osteps.emplace_back(posSupportMaterial);
+            osteps.emplace_back(posSimplifySupportPath);
             steps.emplace_back(psWipeTower);
         }
         else if (opt_key == "z_hop_types") {
@@ -565,6 +568,11 @@ void Print::set_calib_params(const Calib_Params& params) {
 bool Print::invalidate_step(PrintStep step)
 {
 	bool invalidated = Inherited::invalidate_step(step);
+    // Purge planning may restore/regrow support paths without regenerating
+    // support geometry. Those new paths still need the normal simplification.
+    if (step == psWipeTower && m_config.purge_into_inner_walls)
+        for (PrintObject *object : m_objects)
+            invalidated |= object->invalidate_steps({posSimplifySupportPath});
     // Propagate to dependent steps.
     if (step != psGCodeExport)
         invalidated |= Inherited::invalidate_step(psGCodeExport);
@@ -2206,7 +2214,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         // Check statistics for insufficient capacity
         // This would be populated during tool ordering
         // For now, add a general warning that capacity may be insufficient
-        warn(L("Purge into inner walls is enabled. If the objects do not have enough inner wall volume, purge material may not be fully absorbed and color contamination may occur. Ensure objects have sufficient internal walls or consider using a prime tower instead."), "purge_into_inner_walls");
+        warn(L("Purge into inner walls is enabled. If model inner walls and supports do not have enough volume, purge material may not be fully absorbed and color contamination may occur. Consider using a prime tower if their capacity is insufficient."), "purge_into_inner_walls");
     }
 
     if (m_config.spiral_mode) {
@@ -5484,6 +5492,25 @@ void Print::_make_wipe_tower()
 // purge volume could not be absorbed even after growing extra wall loops.
 void Print::_plan_purge_into_inner_walls()
 {
+    // Layers may be shared by identical objects. Restore each only once before
+    // measuring capacity; repeated planning must not accumulate support walls.
+    std::set<SupportLayer *> restored_supports;
+    for (PrintObject *object : m_objects)
+        for (SupportLayer *support : object->support_layers())
+            if (restored_supports.insert(support).second) {
+                // Generators register direct child groups. A pipeline hook may
+                // replace/regroup those paths: discard stale growth metadata
+                // rather than dereferencing a collection it no longer owns.
+                const std::unordered_set<const ExtrusionEntity *> groups(
+                    support->support_fills.entities.begin(), support->support_fills.entities.end());
+                auto &regions = support->purge_support_regions;
+                regions.erase(std::remove_if(regions.begin(), regions.end(), [&](const PurgeSupportRegion &region) {
+                    return groups.count(region.collection()) == 0;
+                }), regions.end());
+                for (PurgeSupportRegion &region : regions)
+                    region.reset();
+            }
+
     // No initial priming extrusions: there is no tower to prime on.
     m_wipe_tower_data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, false);
     m_wipe_tower_data.tool_ordering.sort_and_build_data(*this, (unsigned int) -1, false);
@@ -5503,6 +5530,53 @@ void Print::_plan_purge_into_inner_walls()
     }
 
     this->throw_if_canceled();
+
+    // Model wall growth has already run, before model infill. Only its
+    // residual demand may increase support wall loops. Existing support fill
+    // and interfaces count first, so usable native support needs no extra walls.
+    PrintObjectPtrs support_objects = m_objects;
+    std::stable_sort(support_objects.begin(), support_objects.end(), [](const PrintObject *a, const PrintObject *b) {
+        return a->config().purge_into_inner_walls_preferred.getBool() > b->config().purge_into_inner_walls_preferred.getBool();
+    });
+    unsigned int previous_extruder = m_wipe_tower_data.tool_ordering.first_extruder();
+    for (LayerTools &tools : m_wipe_tower_data.tool_ordering.layer_tools()) {
+        double demand = 0.;
+        for (const unsigned int extruder : tools.extruders) {
+            if (WipingExtrusions::can_purge(m_config, previous_extruder, extruder))
+                demand += estimate_flush_volume(m_config, previous_extruder, extruder);
+            previous_extruder = extruder;
+        }
+        double deficit = demand - tools.wiping_extrusions().purge_capacity(*this);
+        if (deficit <= EPSILON)
+            continue;
+
+        // Account for every copy of a shared layer, while growing its physical
+        // toolpaths just once. Keep object order deterministic.
+        std::vector<std::pair<SupportLayer *, size_t>> supports;
+        for (PrintObject *object : support_objects) {
+            if (!tools.wiping_extrusions().is_support_overriddable(erSupportMaterial, *object))
+                continue;
+            SupportLayer *support = object->get_support_layer_at_printz(tools.print_z, EPSILON);
+            if (support == nullptr || object->instances().empty())
+                continue;
+            auto it = std::find_if(supports.begin(), supports.end(),
+                                   [support](const auto &item) { return item.first == support; });
+            if (it == supports.end())
+                supports.emplace_back(support, object->instances().size());
+            else
+                it->second += object->instances().size();
+        }
+        for (const auto &[support, copies] : supports) {
+            for (PurgeSupportRegion &region : support->purge_support_regions) {
+                deficit -= region.grow(deficit / double(copies)) * double(copies);
+                if (deficit <= EPSILON)
+                    break;
+                this->throw_if_canceled();
+            }
+            if (deficit <= EPSILON)
+                break;
+        }
+    }
 
     float  total_leftover       = 0.f;
     float  worst_layer_leftover = 0.f;
@@ -5537,10 +5611,10 @@ void Print::_plan_purge_into_inner_walls()
         this->active_step_add_warning(
             PrintStateBase::WarningLevel::CRITICAL,
             Slic3r::format(_u8L("Purge into inner walls could not absorb the full purge volume: %1% mm³ in total could not "
-                                "be purged into inner walls even after growing extra wall loops (worst layer: %2% mm³ at height %3%; "
-                                "%4% toolchanges on %5% layers affected). The purge volume was reduced proportionally on those "
-                                "layers, so the print may show color bleeding. Increase the number of wall loops, prioritize "
-                                "larger objects for purging, or use a prime tower instead."),
+                                "be purged into model inner walls or supports even after growing extra wall loops (worst layer: %2% mm³ at height %3%; "
+                                "affected toolchanges: %4%; affected layers: %5%). The purge volume was reduced proportionally on those "
+                                "layers, so the print may show color bleeding. Prioritize larger objects for purging, "
+                                "add supports, or use a prime tower instead."),
                            int(std::ceil(total_leftover)), int(std::ceil(worst_layer_leftover)),
                            Slic3r::float_to_string_decimal_point(worst_layer_z, 2),
                            stats.purge_inner_walls_affected_transition_count,

@@ -3411,7 +3411,25 @@ bool WipingExtrusions::is_overriddable(const ExtrusionEntityCollection& eec, con
 // BBS
 bool WipingExtrusions::is_support_overriddable(const ExtrusionRole role, const PrintObject& object) const
 {
-    if (!object.config().flush_into_support || object.print()->config().purge_into_inner_walls)
+    const PrintConfig &config = object.print()->config();
+    if (config.purge_into_inner_walls) {
+        // All support walls/fill may carry purge, unlike model exteriors.
+        // Keep soluble, dedicated support and virtual mixed materials intact.
+        if (role == erMixed)
+            return is_support_overriddable(erSupportMaterial, object) ||
+                   is_support_overriddable(erSupportMaterialInterface, object);
+        int filament;
+        if (role == erSupportMaterial || role == erSupportTransition)
+            filament = object.config().support_filament.value;
+        else if (role == erSupportMaterialInterface)
+            filament = object.config().support_interface_filament.value;
+        else
+            return false; // ironing is finishing, not purge capacity
+        return filament == 0 || (!config.filament_soluble.get_at(filament - 1) &&
+                                 !config.filament_is_support.get_at(filament - 1) &&
+                                 !config.filament_is_mixed.get_at(filament - 1));
+    }
+    if (!object.config().flush_into_support)
         return false;
 
     if (role == erMixed) {
@@ -3427,6 +3445,38 @@ bool WipingExtrusions::is_support_overriddable(const ExtrusionRole role, const P
     return false;
 }
 
+bool WipingExtrusions::can_purge(const PrintConfig &config, unsigned int old_extruder, unsigned int new_extruder)
+{
+    return !config.filament_soluble.get_at(old_extruder) && !config.filament_soluble.get_at(new_extruder) &&
+           !config.filament_is_support.get_at(old_extruder) && !config.filament_is_support.get_at(new_extruder);
+}
+
+int WipingExtrusions::get_extruder_override(const ExtrusionEntity* entity, const PrintObject* object, size_t copy_id) const
+{
+    const auto it = entity_map.find(std::make_tuple(entity, object));
+    return it != entity_map.end() && copy_id < it->second.size() ? std::max(-1, int(it->second[copy_id])) : -1;
+}
+
+float WipingExtrusions::purge_capacity(const Print& print) const
+{
+    float capacity = 0.f;
+    for (const PrintObject *object : print.objects()) {
+        const float copies = float(object->instances().size());
+        if (const Layer *layer = object->get_layer_at_printz(m_layer_tools->print_z, EPSILON))
+            for (const LayerRegion *region : layer->regions())
+                for (const ExtrusionEntity *entity : region->perimeters.entities)
+                    if (const auto *walls = dynamic_cast<const ExtrusionEntityCollection *>(entity))
+                        if (is_overriddable(*walls, print.config(), *object, region->region()))
+                            capacity += float(walls->total_volume()) * copies;
+        if (const SupportLayer *support = object->get_support_layer_at_printz(m_layer_tools->print_z, EPSILON))
+            for_each_extrusion_leaf(support->support_fills, [&](const ExtrusionEntity &entity) {
+                if (is_support_overriddable(entity.role(), *object))
+                    capacity += float(entity.total_volume()) * copies;
+            });
+    }
+    return capacity;
+}
+
 // Following function iterates through all extrusions on the layer, remembers those that could be used for wiping after toolchange
 // and returns volume that is left to be wiped on the wipe tower.
 // stats: reference to FilamentChangeStats to update purge-into-inner-walls statistics
@@ -3435,12 +3485,15 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
     const LayerTools& lt = *m_layer_tools;
     const float min_infill_volume = 0.f; // ignore infill with smaller volume than this
 
-    if (! this->something_overridable || volume_to_wipe <= 0. || print.config().filament_soluble.get_at(old_extruder) || print.config().filament_soluble.get_at(new_extruder))
-        return std::max(0.f, volume_to_wipe); // Soluble filament cannot be wiped in a random infill, neither the filament after it
+    // Remember the layer's entry filament even when its first changes involve
+    // protected material. The first eligible change may occur much later.
+    if (print.config().purge_into_inner_walls && m_purge_initial_extruder < 0)
+        m_purge_initial_extruder = int(old_extruder);
 
-    // BBS
-    if (print.config().filament_is_support.get_at(old_extruder) || print.config().filament_is_support.get_at(new_extruder))
-        return std::max(0.f, volume_to_wipe); // Support filament cannot be used to print support, infill, wipe_tower, etc.
+    // Neither soluble/dedicated support material nor the material immediately
+    // after it may contaminate a model or an ordinary support body.
+    if (!this->something_overridable || volume_to_wipe <= 0. || !can_purge(print.config(), old_extruder, new_extruder))
+        return std::max(0.f, volume_to_wipe);
 
     // ORCA: Purge into inner walls - handle purge mode separately
     // This replaces the prime tower; no tower fallback
@@ -3451,7 +3504,7 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         // Process objects prioritized for purge (purge_into_inner_walls_preferred) first;
         // any remaining purge volume then flows into unmarked objects' inner walls.
         ConstPrintObjectPtrs purge_object_list = print.objects().vector();
-        std::sort(purge_object_list.begin(), purge_object_list.end(), [purge_object_list](const PrintObject* a, const PrintObject* b) {
+        std::sort(purge_object_list.begin(), purge_object_list.end(), [](const PrintObject* a, const PrintObject* b) {
             bool a_preferred = a->config().purge_into_inner_walls_preferred.getBool();
             bool b_preferred = b->config().purge_into_inner_walls_preferred.getBool();
             if (a_preferred != b_preferred) {
@@ -3460,32 +3513,21 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
             return a->id() < b->id();
         });
 
-        // Proportional reduction: if this layer's inner walls cannot absorb
+        // Proportional reduction: if this layer's inner walls/supports cannot absorb
         // the layer's total purge demand even after the demand-driven wall
-        // growth in PrintObject::make_perimeters(), scale every toolchange on
-        // the layer down by the same factor. The walls then still fill
+        // growth in PrintObject::make_perimeters() and support wall growth,
+        // scale eligible toolchanges on the layer down by the same factor. The walls then still fill
         // completely (no unprinted gaps), each color is short by the same
         // relative amount, and the shortfall is reported by
         // Print::_plan_purge_into_inner_walls(). Computed lazily on the
         // layer's first toolchange, before any of its walls are overridden.
         if (m_purge_layer_scale < 0.f) {
-            float capacity = 0.f;
-            for (const PrintObject* object : purge_object_list) {
-                const Layer* this_layer = object->get_layer_at_printz(lt.print_z, EPSILON);
-                if (this_layer == nullptr)
-                    continue;
-                const float copies = float(object->instances().size());
-                for (const LayerRegion *layerm : this_layer->regions())
-                    for (const ExtrusionEntity* ee : layerm->perimeters.entities) {
-                        auto* coll = dynamic_cast<const ExtrusionEntityCollection*>(ee);
-                        if (coll && is_overriddable(*coll, print.config(), *object, layerm->region()))
-                            capacity += static_cast<float>(coll->total_volume()) * copies;
-                    }
-            }
+            const float capacity = purge_capacity(print);
             float layer_demand = 0.f;
-            unsigned int prev_extruder = old_extruder;
+            unsigned int prev_extruder = unsigned(m_purge_initial_extruder);
             for (const unsigned int extruder_id : lt.extruders) {
-                layer_demand += estimate_flush_volume(print.config(), prev_extruder, extruder_id);
+                if (can_purge(print.config(), prev_extruder, extruder_id))
+                    layer_demand += estimate_flush_volume(print.config(), prev_extruder, extruder_id);
                 prev_extruder = extruder_id;
             }
             m_purge_layer_scale = layer_demand > 0.f ? std::min(1.f, capacity / layer_demand) : 1.f;
@@ -3563,6 +3605,31 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                 remaining -= consumed;
                 purge_consumed += consumed;
             }
+        }
+
+        // Model inner walls are always exhausted before support paths, even
+        // when a support-bearing object has the per-object priority checkbox.
+        // Allocate leaves, not an entire support layer: different changes and
+        // copies may need different purge filaments; unclaimed paths stay native.
+        for (const PrintObject *object : purge_object_list) {
+            if (remaining <= 0.f)
+                break;
+            const SupportLayer *support = object->get_support_layer_at_printz(lt.print_z, EPSILON);
+            if (support == nullptr)
+                continue;
+            const size_t copies = object->instances().size();
+            for (size_t copy = 0; copy < copies && remaining > 0.f; ++copy)
+                for_each_extrusion_leaf(support->support_fills, [&](const ExtrusionEntity &entity) {
+                    if (remaining <= 0.f || !is_support_overriddable(entity.role(), *object) ||
+                        is_entity_overridden(&entity, object, copy))
+                        return;
+                    const float volume = float(entity.total_volume());
+                    if (volume <= 0.f)
+                        return;
+                    set_extruder_override(&entity, object, copy, new_extruder, copies);
+                    remaining -= volume;
+                    purge_consumed += volume;
+                });
         }
 
         // The part of the requested volume that did not fit into inner walls

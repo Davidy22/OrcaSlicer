@@ -1,3 +1,4 @@
+#include "PurgeSupport.hpp"
 #include "../ClipperUtils.hpp"
 #include "../ClipperZUtils.hpp"
 #include "../ExtrusionEntityCollection.hpp"
@@ -1431,6 +1432,9 @@ void generate_support_toolpaths(
     const SupportGeneratorLayersPtr     &interface_layers,
     const SupportGeneratorLayersPtr     &base_interface_layers)
 {
+    const bool purge_support = !support_layers.empty() &&
+        support_layers.front()->object()->print()->config().purge_into_inner_walls;
+
     // loop_interface_processor with a given circle radius.
     LoopInterfaceProcessor loop_interface_processor(1.5 * support_params.support_material_interface_flow.scaled_width());
     loop_interface_processor.n_contact_loops = config.support_interface_loop_pattern.value ? 1 : 0;
@@ -1547,6 +1551,9 @@ void generate_support_toolpaths(
 
         float    ironing_angle;
         Polygons polys_to_iron;
+        ExPolygons purge_growth_areas;
+        Flow purge_growth_flow;
+        size_t purge_base_wall_count = 0;
 
         void add_nonempty_and_sort() {
             for (SupportGeneratorLayerExtruded *item : { &bottom_contact_layer, &top_contact_layer, &interface_layer, &base_interface_layer, &base_layer })
@@ -1560,7 +1567,7 @@ void generate_support_toolpaths(
 
     tbb::parallel_for(tbb::blocked_range<size_t>(n_raft_layers, support_layers.size()),
         [&config, &slicing_params, &support_params, &support_layers, &bottom_contacts, &top_contacts, &intermediate_layers, &interface_layers, &base_interface_layers, &layer_caches, &loop_interface_processor,
-            &bbox_object, &angles, n_raft_layers, link_max_length_factor]
+            &bbox_object, &angles, n_raft_layers, link_max_length_factor, purge_support]
             (const tbb::blocked_range<size_t>& range) {
         // Indices of the 1st layer in their respective container at the support layer height.
         size_t idx_layer_bottom_contact   = size_t(-1);
@@ -1841,6 +1848,14 @@ void generate_support_toolpaths(
                         // Extrusion parameters
                         ExtrusionRole::erSupportMaterial, flow,
                         support_params, sheath, no_sort);
+                if (purge_support) {
+                    layer_cache.purge_growth_areas = union_ex(base_layer.polygons_to_extrude());
+                    layer_cache.purge_growth_flow = flow;
+                    layer_cache.purge_base_wall_count = std::max(config.tree_support_wall_count.value, sheath ? 1 : 0);
+                    // Auto tree branches can already have a second wall.
+                    if (done || (sheath && density == 0.f))
+                        layer_cache.purge_base_wall_count = std::max<size_t>(2, layer_cache.purge_base_wall_count);
+                }
             }
 
             // Merge base_interface_layers to base_layers to avoid unneccessary retractions
@@ -1894,7 +1909,7 @@ void generate_support_toolpaths(
 
     // Now modulate the support layer height in parallel.
     tbb::parallel_for(tbb::blocked_range<size_t>(n_raft_layers, support_layers.size()),
-        [&support_layers, &layer_caches, &support_params, &bbox_object]
+        [&support_layers, &layer_caches, &support_params, &bbox_object, purge_support]
             (const tbb::blocked_range<size_t>& range) {
         for (size_t support_layer_id = range.begin(); support_layer_id < range.end(); ++ support_layer_id) {
             SupportLayer &support_layer = *support_layers[support_layer_id];
@@ -1903,7 +1918,21 @@ void generate_support_toolpaths(
             for (LayerCacheItem &layer_cache_item : layer_cache.nonempty) {
                 // Trim the extrusion height from the bottom by the overlapping layers.
                 modulate_extrusion_by_overlapping_layers(layer_cache_item.layer_extruded->extrusions, *layer_cache_item.layer_extruded->layer, layer_cache_item.overlapping);
-                support_layer.support_fills.append(std::move(layer_cache_item.layer_extruded->extrusions));
+                if (purge_support && layer_cache_item.layer_extruded == &layer_cache.base_layer &&
+                    !layer_cache.base_layer.extrusions.empty() && !layer_cache.purge_growth_areas.empty()) {
+                    // Modulated overlap regions have different heights. Keep their
+                    // original paths, but never grow full-height walls into them.
+                    ExPolygons areas = std::move(layer_cache.purge_growth_areas);
+                    for (const SupportGeneratorLayer *overlap : layer_cache_item.overlapping)
+                        areas = diff_ex(areas, overlap->polygons);
+                    auto paths = std::make_unique<ExtrusionEntityCollection>();
+                    paths->append(std::move(layer_cache.base_layer.extrusions));
+                    support_layer.purge_support_regions.emplace_back(*paths, std::move(areas),
+                        layer_cache.purge_growth_flow, layer_cache.purge_base_wall_count);
+                    support_layer.support_fills.entities.emplace_back(paths.release());
+                } else {
+                    support_layer.support_fills.append(std::move(layer_cache_item.layer_extruded->extrusions));
+                }
             }
 
             // Orca: Generate iron toolpath for contact layer

@@ -54,6 +54,11 @@ public:
     int get_support_extruder_overrides(const PrintObject* object);
     int get_support_interface_extruder_overrides(const PrintObject* object);
 
+    // Read-only, per-entity/per-copy routing (unclaimed/native returns -1).
+    int get_extruder_override(const ExtrusionEntity* entity, const PrintObject* object, size_t copy_id) const;
+    float purge_capacity(const Print& print) const;
+    static bool can_purge(const PrintConfig& config, unsigned int old_extruder, unsigned int new_extruder);
+
     // This function goes through all infill entities, decides which ones will be used for wiping and
     // marks them by the extruder id. Returns volume that remains to be wiped on the wipe tower:
     // stats: reference to FilamentChangeStats to update purge-into-inner-walls statistics
@@ -92,7 +97,7 @@ public:
     // from the ones that are unclaimed waste (Print::_plan_belt_purge()).
     bool is_entity_overridden(const ExtrusionEntity* entity, const PrintObject *object, size_t copy_id) const {
         auto it = entity_map.find(std::make_tuple(entity, object));
-        return it != entity_map.end() && copy_id < it->second.size() && it->second[copy_id] != -1;
+        return it != entity_map.end() && copy_id < it->second.size() && it->second[copy_id] >= 0;
     }
 
 private:
@@ -116,10 +121,11 @@ private:
 
     // ORCA: Purge into inner walls - per-layer proportional reduction state.
     // m_purge_layer_scale (< 0 = not computed yet): fraction of each
-    // toolchange's requested purge volume that this layer's inner walls can
+    // toolchange's requested purge volume that this layer's inner walls/supports can
     // absorb in total, applied uniformly to all toolchanges on the layer.
     // m_purge_shortfall_counted: this layer already contributed to the
     // affected-layer statistics (counted once per layer, not per toolchange).
+    int   m_purge_initial_extruder = -1;
     float m_purge_layer_scale = -1.f;
     bool  m_purge_shortfall_counted = false;
 };
