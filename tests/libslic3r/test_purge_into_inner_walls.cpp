@@ -29,8 +29,9 @@ ExtrusionLoop purge_test_loop(ExtrusionRole role, int inset, bool generated = fa
     path.width = 0.4f;
     path.height = 0.2f;
     path.inset_idx = inset;
-    path.polyline = Polyline3(Polyline(Points{Point(0, 0), Point::new_scale(10., 0.),
-                                             Point(scale_(10.), scale_(10.)), Point::new_scale(0., 10.), Point(0, 0)}));
+    path.polyline = Polyline3(Polyline(Points{
+        Point::new_scale(0., 0.), Point::new_scale(10., 0.), Point::new_scale(10., 10.),
+        Point::new_scale(0., 10.), Point::new_scale(0., 0.)}));
     ExtrusionLoop loop(std::move(path));
     loop.inset_idx = inset;
     loop.is_purge_inner_wall_candidate = inset > 0;
