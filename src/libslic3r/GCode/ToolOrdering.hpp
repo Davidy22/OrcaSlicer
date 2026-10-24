@@ -97,7 +97,7 @@ public:
     // from the ones that are unclaimed waste (Print::_plan_belt_purge()).
     bool is_entity_overridden(const ExtrusionEntity* entity, const PrintObject *object, size_t copy_id) const {
         auto it = entity_map.find(std::make_tuple(entity, object));
-        return it != entity_map.end() && copy_id < it->second.size() && it->second[copy_id] != -1;
+        return it != entity_map.end() && copy_id < it->second.size() && it->second[copy_id] >= 0;
     }
 
 private:

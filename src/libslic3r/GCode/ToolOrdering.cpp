@@ -82,7 +82,6 @@ static std::set<int>get_filament_by_type(const std::vector<unsigned int>& used_f
     return target_filaments;
 }
 
-
 // Returns true in case that extruder a comes before b (b does not have to be present). False otherwise.
 bool LayerTools::is_extruder_order(unsigned int a, unsigned int b) const
 {
@@ -499,7 +498,6 @@ void ToolOrdering::sort_and_build_data(const PrintObject& object , unsigned int 
 
     this->collect_extruder_statistics(prime_multi_material);
 }
-
 
 // For the use case when each object is printed separately
 // (print->config().print_sequence == PrintSequence::ByObject is true).
@@ -1054,7 +1052,6 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
     }
 }
 
-
 void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_t object_bottom_z, coordf_t max_layer_height)
 {
     if (m_layer_tools.empty())
@@ -1075,7 +1072,6 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
     // Propagate the wipe tower partitions down to support the upper partitions by the lower partitions.
     for (int i = int(m_layer_tools.size()) - 2; i >= 0; -- i)
         m_layer_tools[i].wipe_tower_partitions = std::max(m_layer_tools[i + 1].wipe_tower_partitions, m_layer_tools[i].wipe_tower_partitions);
-
 
     int wrapping_layer_nums = config.wrapping_detection_layers;
     for (size_t i = 0; i < wrapping_layer_nums; ++i) {
@@ -1343,7 +1339,6 @@ float ToolOrdering::cal_max_additional_fan(const PrintConfig &config)
     }
     return max_fan;
 }
-
 
 //BBS: find first non support filament
 bool ToolOrdering::cal_non_support_filaments(const PrintConfig &config,
@@ -3689,7 +3684,7 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         // Finds this layer:
         const Layer* this_layer = object->get_layer_at_printz(lt.print_z, EPSILON);
         if (this_layer == nullptr)
-        	continue;
+            continue;
 
         size_t num_of_copies = object->instances().size();
 
@@ -3719,8 +3714,8 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                         {     // this infill will be used to wipe this extruder
                             set_extruder_override(fill, object, copy, new_extruder, num_of_copies);
                             if ((volume_to_wipe -= float(fill->total_volume())) <= 0.f)
-                            	// More material was purged already than asked for.
-	                            return 0.f;
+                                // More material was purged already than asked for.
+                                return 0.f;
                         }
                     }
                 }
@@ -3733,8 +3728,8 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                         if (is_overriddable(*fill, print.config(), *object, region) && !is_entity_overridden(fill, object, copy) && fill->total_volume() > min_infill_volume) {
                             set_extruder_override(fill, object, copy, new_extruder, num_of_copies);
                             if ((volume_to_wipe -= float(fill->total_volume())) <= 0.f)
-                            	// More material was purged already than asked for.
-	                            return 0.f;
+                                // More material was purged already than asked for.
+                                return 0.f;
                         }
                     }
                 }
@@ -3780,11 +3775,11 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
             }
         }
     }
-	// Some purge remains to be done on the Wipe Tower.
+
+    // Some purge remains to be done on the Wipe Tower.
     assert(volume_to_wipe > 0.);
     return volume_to_wipe;
 }
-
 
 
 // Called after all toolchanges on a layer were mark_infill_overridden. There might still be overridable entities,
