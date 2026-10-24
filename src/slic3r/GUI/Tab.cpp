@@ -2155,6 +2155,8 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
             if (dlg.ShowModal() == wxID_YES) {
                 DynamicPrintConfig new_conf = *m_config;
                 new_conf.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
+                // This accepted tower choice must survive the reload's preset-conflict rule.
+                new_conf.set_key_value("purge_into_inner_walls", new ConfigOptionBool(false));
                 m_config_manipulation.apply(m_config, &new_conf);
                 wxGetApp().plater()->update();
             }
@@ -2435,6 +2437,9 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         // And call of the update() can causes a redundant check of the config values,
         return;
     }
+
+    if (is_fff && (opt_key == "purge_into_inner_walls" || opt_key == "enable_prime_tower"))
+        m_config_manipulation.update_purge_options(m_config, opt_key);
 
     update();
     if(m_active_page)

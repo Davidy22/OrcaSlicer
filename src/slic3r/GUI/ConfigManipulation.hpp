@@ -85,6 +85,9 @@ public:
     void    set_option_label(const std::string& field_key, const wxString& label, int opt_index = -1);
 
     // FFF print
+    // Keep the last selected purge destination; an empty key resolves loaded
+    // conflicting presets with the same inner-wall priority as the slicer.
+    void    update_purge_options(DynamicPrintConfig* config, const std::string& changed_key = {});
     void    update_print_fff_config(DynamicPrintConfig* config, const bool is_global_config = false, const bool is_plate_config = false);
     void    toggle_print_fff_options(DynamicPrintConfig* config, int variant_index, const bool is_global_config = false);
     void    apply_null_fff_config(DynamicPrintConfig *config, std::vector<std::string> const &keys, std::map<ObjectBase*, ModelConfig*> const & configs);

@@ -13,6 +13,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/PrintBase.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/libslic3r.h"
@@ -171,4 +172,25 @@ TEST_CASE("Changing a purge preference invalidates every object's walls", "[Purg
     for (const PrintObject *object : print.objects())
         CHECK_FALSE(object->is_step_done(posPerimeters));
     CHECK_FALSE(print.is_step_done(psWipeTower));
+}
+
+TEST_CASE("Enabling inner-wall purge does not emit a blanket validation warning", "[PurgeIntoInnerWalls][Regression]")
+{
+    Model model;
+    Print print;
+    DynamicPrintConfig config = purge_config("classic", 3);
+    config.set_deserialize_strict({
+        {"use_relative_e_distances", true},
+        {"layer_change_gcode", "G92 E0\n"},
+    });
+    init_purge_print(print, model, config);
+    REQUIRE(print.objects().size() == 2);
+    std::vector<StringObjectException> warnings;
+    const StringObjectException validation = print.validate(&warnings);
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    for (const StringObjectException& warning : warnings)
+        CHECK(warning.opt_key != "purge_into_inner_walls");
+    // A measured capacity shortfall is still reported by the purge planner
+    // after slicing; opting into the mode alone must not produce a warning.
 }

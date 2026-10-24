@@ -56,6 +56,23 @@ void ConfigManipulation::apply(DynamicPrintConfig* config, DynamicPrintConfig* n
     m_applying_keys.clear();
 }
 
+void ConfigManipulation::update_purge_options(DynamicPrintConfig* config, const std::string& changed_key)
+{
+    if (!changed_key.empty() && changed_key != "purge_into_inner_walls" && changed_key != "enable_prime_tower")
+        return;
+    const auto* purge = config->option<ConfigOptionBool>("purge_into_inner_walls");
+    const auto* tower = config->option<ConfigOptionBool>("enable_prime_tower");
+    if (purge == nullptr || tower == nullptr || !purge->value || !tower->value)
+        return;
+
+    DynamicPrintConfig new_conf = *config;
+    const char* disabled = changed_key == "enable_prime_tower" ? "purge_into_inner_walls" : "enable_prime_tower";
+    new_conf.option<ConfigOptionBool>(disabled)->value = false;
+    // Reload both fields and their dependent options without a confirmation
+    // dialog or another on_value_change event for the unchecked destination.
+    apply(config, &new_conf);
+}
+
 bool ConfigManipulation::is_applying() const { return is_msg_dlg_already_exist; }
 
 t_config_option_keys const &ConfigManipulation::applying_keys() const
@@ -349,6 +366,8 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
     // let check if this process is already started.
     if (is_msg_dlg_already_exist)
         return;
+
+    update_purge_options(config);
 
     bool is_object_config = (!is_global_config && !is_plate_config);
 

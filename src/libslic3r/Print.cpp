@@ -2209,14 +2209,6 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             warn(L("A prime tower is required for clumping detection; otherwise, there may be flaws on the model."), "enable_prime_tower");
     }
     
-    // ORCA: Purge into inner walls - warn about insufficient capacity
-    if (m_config.purge_into_inner_walls.getBool()) {
-        // Check statistics for insufficient capacity
-        // This would be populated during tool ordering
-        // For now, add a general warning that capacity may be insufficient
-        warn(L("Purge into inner walls is enabled. If model inner walls and supports do not have enough volume, purge material may not be fully absorbed and color contamination may occur. Consider using a prime tower if their capacity is insufficient."), "purge_into_inner_walls");
-    }
-
     if (m_config.spiral_mode) {
         size_t total_copies_count = 0;
         for (const PrintObject* object : m_objects)

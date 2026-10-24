@@ -9,6 +9,8 @@
 
 namespace Slic3r {
 
+// Per-region wall-growth bookkeeping shared by the existing support generators,
+// not a support type or a separate support generator.
 // A support generator supplies its actual printable base area and flow. The
 // collection remains owned by SupportLayer::support_fills; neither the model
 // nor support interfaces/overlapping-height regions are enlarged by this helper.
