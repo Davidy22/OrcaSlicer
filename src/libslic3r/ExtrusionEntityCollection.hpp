@@ -40,20 +40,14 @@ public:
     bool no_sort;
     ExtrusionEntityCollection(): no_sort(false) {}
     ExtrusionEntityCollection(const ExtrusionEntityCollection &other) : no_sort(other.no_sort), is_reverse(other.is_reverse) { this->append(other.entities); }
-    ExtrusionEntityCollection(ExtrusionEntityCollection &&other) noexcept : entities(std::move(other.entities)), no_sort(other.no_sort), is_reverse(other.is_reverse) {}
+    ExtrusionEntityCollection(ExtrusionEntityCollection &&other) : entities(std::move(other.entities)), no_sort(other.no_sort), is_reverse(other.is_reverse) {}
     explicit ExtrusionEntityCollection(const ExtrusionPaths &paths);
     ExtrusionEntityCollection& operator=(const ExtrusionEntityCollection &other);
-    ExtrusionEntityCollection& operator=(ExtrusionEntityCollection &&other) noexcept
+    ExtrusionEntityCollection& operator=(ExtrusionEntityCollection &&other)
     {
-        if (this != &other) {
-            // Take ownership before clearing: other may be one of our descendants.
-            // Moving the vector alone would leak our previous owned entities.
-            ExtrusionEntityCollection replacement(std::move(other));
-            clear();
-            this->entities = std::move(replacement.entities);
-            this->no_sort  = replacement.no_sort;
-            is_reverse     = replacement.is_reverse;
-        }
+        this->entities = std::move(other.entities);
+        this->no_sort  = other.no_sort;
+        is_reverse     = other.is_reverse;
         return *this;
     }
     ~ExtrusionEntityCollection() { clear(); }
