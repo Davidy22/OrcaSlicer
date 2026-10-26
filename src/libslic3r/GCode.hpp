@@ -645,7 +645,9 @@ protected:
 		// For sequential print, the instance of the object to be printing has to be defined.
 		const size_t                     				 single_object_instance_idx);
 
-    std::string     extrude_perimeters(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool is_first_layer, bool is_infill_first, bool unsupported_loops_only = false);
+    std::string     extrude_perimeters(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region,
+                                      bool is_first_layer, bool is_infill_first, bool unsupported_loops_only = false,
+                                      bool purge_walls = false);
     std::string     extrude_infill(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool ironing);
     std::string     extrude_support(const ExtrusionEntityCollection& support_fills, const ExtrusionRole support_extrusion_role);
     std::string     extrude_purge_support(const ObjectByExtruder& support, const WipingExtrusions& wiping,
@@ -761,6 +763,9 @@ protected:
 
     OozePrevention                      m_ooze_prevention;
     Wipe                                m_wipe;
+    // Active only while emitting overridden model walls in the purge pass.
+    bool                                m_purge_wall = false;
+    size_t                              m_purge_wall_index = 0;
     AvoidCrossingPerimeters             m_avoid_crossing_perimeters;
     RetractWhenCrossingPerimeters       m_retract_when_crossing_perimeters;
     TimelapsePosPicker                  m_timelapse_pos_picker;

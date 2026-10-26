@@ -10,6 +10,7 @@
 #include "ClipperUtils.hpp"
 #include "ParameterUtils.hpp"
 #include "GCode/ToolOrderUtils.hpp"
+#include "GCode/PurgeIntoInnerWalls.hpp"
 #include "FilamentGroupUtils.hpp"
 #include "MultiNozzleUtils.hpp"
 #include "FilamentMixer.hpp"
@@ -3553,8 +3554,8 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                 const ExtrusionEntityCollection* collection;
                 const PrintObject* object;
                 unsigned int copy;
-                int priority;
-                bool is_preferred_object;
+                int inset_idx;
+                bool matches_outer_wall;
                 bool is_existing;
                 float volume;
             };
@@ -3567,15 +3568,10 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                         if (!coll || !is_overriddable(*coll, print.config(), *object, layerm->region()))
                             continue;
 
-                        bool is_preferred_obj = object->config().purge_into_inner_walls_preferred.getBool();
-                        int priority = 0;
-                        if (is_preferred_obj)
-                            priority += 10000;
-                        if (coll->is_existing_purge_wall())
-                            priority += 1000;
-                        priority += coll->get_max_inset_idx();
-
-                        candidates.push_back({coll, object, copy, priority, is_preferred_obj,
+                        // Use the exterior's filament, not the inner-wall filament:
+                        // region overrides may deliberately make those different.
+                        const bool matches_outer_wall = lt.wall_extruder_id(layerm->region()) == new_extruder;
+                        candidates.push_back({coll, object, copy, coll->get_max_inset_idx(), matches_outer_wall,
                                               coll->is_existing_purge_wall(), static_cast<float>(coll->total_volume())});
 
                       if (coll->is_existing_purge_wall())
@@ -3587,11 +3583,8 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
             }
 
             std::sort(candidates.begin(), candidates.end(), [](const PurgeCandidate& a, const PurgeCandidate& b) {
-                if (a.is_preferred_object != b.is_preferred_object)
-                    return a.is_preferred_object > b.is_preferred_object;
-                if (a.priority != b.priority)
-                    return a.priority > b.priority;
-                return a.volume > b.volume;
+                return PurgeIntoInnerWalls::wall_priority(a.matches_outer_wall, a.inset_idx, a.is_existing, a.volume) >
+                       PurgeIntoInnerWalls::wall_priority(b.matches_outer_wall, b.inset_idx, b.is_existing, b.volume);
             });
 
             for (const auto& cand : candidates) {

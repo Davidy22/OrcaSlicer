@@ -5,6 +5,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/GCode/PurgeIntoInnerWalls.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Point.hpp"
@@ -17,6 +18,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <utility>
 
 using namespace Slic3r;
@@ -266,48 +268,17 @@ TEST_CASE("Purge flush volume estimate", "[PurgeIntoInnerWalls]")
     REQUIRE(estimate_flush_volume(config, 1, 1) == Catch::Approx(0.));
 }
 
-// Test purge candidate priority ordering
-TEST_CASE("Purge candidate priority ordering", "[PurgeIntoInnerWalls]")
+TEST_CASE("Purge wall priority follows exterior filament and inset depth", "[PurgeIntoInnerWalls][Regression]")
 {
-    struct PurgeCandidate {
-        int priority;
-        float volume;
-        bool is_purge_object;
-        bool is_existing;
-    };
-    
-    std::vector<PurgeCandidate> candidates = {
-        {100, 5.0f, false, true},   // existing inner wall, not purge object
-        {10005, 3.0f, true, true},  // existing inner wall, purge object
-        {5, 2.0f, false, false},    // extra wall, not purge object
-        {10000, 4.0f, true, false}, // extra wall, purge object
-        {1003, 6.0f, false, true},  // existing inner wall, higher inset, not purge object
-    };
-    
-    // Sort by priority (highest first), then by is_purge_object, then by volume
-    std::sort(candidates.begin(), candidates.end(), [](const PurgeCandidate& a, const PurgeCandidate& b) {
-        if (a.is_purge_object != b.is_purge_object)
-            return a.is_purge_object > b.is_purge_object;
-        if (a.priority != b.priority)
-            return a.priority > b.priority;
-        return a.volume > b.volume;
-    });
-    
-    // Verify ordering
-    REQUIRE(candidates[0].is_purge_object == true);  // purge object first
-    REQUIRE(candidates[0].priority == 10005);        // highest priority purge object
-    
-    REQUIRE(candidates[1].is_purge_object == true);  // second purge object
-    REQUIRE(candidates[1].priority == 10000);
-    
-    REQUIRE(candidates[2].is_purge_object == false); // then non-purge objects
-    REQUIRE(candidates[2].priority == 1003);         // highest priority non-purge
-    
-    REQUIRE(candidates[3].is_purge_object == false);
-    REQUIRE(candidates[3].priority == 100);
-    
-    REQUIRE(candidates[4].is_purge_object == false);
-    REQUIRE(candidates[4].priority == 5);  // lowest priority (extra wall)
+    using PurgeIntoInnerWalls::wall_priority;
+    // Matching filament takes the closest safe wall, even when a larger or
+    // pre-existing wall is deeper inside. Foreign filament does the reverse.
+    CHECK(wall_priority(true, 1, false, 1.f) > wall_priority(true, 3, true, 20.f));
+    CHECK(wall_priority(false, 5, false, 1.f) > wall_priority(false, 2, true, 20.f));
+    CHECK(wall_priority(true, 4, true, 1.f) > wall_priority(false, 8, true, 20.f));
+    // Existing capacity and volume only break ties at the same color/depth.
+    CHECK(wall_priority(false, 2, true, 1.f) > wall_priority(false, 2, false, 20.f));
+    CHECK(wall_priority(true, 2, true, 20.f) > wall_priority(true, 2, true, 1.f));
 }
 
 // Test that objects with purge_into_inner_walls are prioritized
@@ -340,40 +311,24 @@ TEST_CASE("Object purge prioritization", "[PurgeIntoInnerWalls]")
     REQUIRE(objects[1].id == 1);
 }
 
-// Test that existing inner walls are consumed before extra walls
-TEST_CASE("Existing walls consumed before extra walls", "[PurgeIntoInnerWalls]")
+TEST_CASE("Purge wall speed ramps without exceeding existing speed or flow limits", "[PurgeIntoInnerWalls][Regression]")
 {
-    struct PurgeCandidate {
-        int priority;
-        bool is_existing;
-        float volume;
-    };
-    
-    std::vector<PurgeCandidate> candidates = {
-        {1005, true, 10.0f},   // existing wall
-        {5, false, 5.0f},      // extra wall
-        {1003, true, 8.0f},    // existing wall with lower inset
-        {3, false, 3.0f},      // another extra wall
-    };
-    
-    // Sort: existing first (higher priority), then by inset
-    std::sort(candidates.begin(), candidates.end(), [](const PurgeCandidate& a, const PurgeCandidate& b) {
-        if (a.is_existing != b.is_existing)
-            return a.is_existing > b.is_existing;  // existing before extra
-        return a.priority > b.priority;
-    });
-    
-    // Verify: all existing walls come before extra walls
-    for (size_t i = 0; i < candidates.size(); ++i) {
-        if (i > 0 && !candidates[i-1].is_existing && candidates[i].is_existing) {
-            FAIL("Extra wall found before existing wall in sorted order");
-        }
+    using PurgeIntoInnerWalls::limit_speed;
+    using Catch::Matchers::WithinAbs;
+    const double target = 60.;
+    const std::vector<double> expected{19.8, 22.5, 27.48, 52.5, 52.5 + 50. / 60.};
+    for (size_t wall = 0; wall < expected.size(); ++wall) {
+        CAPTURE(wall);
+        CHECK_THAT(limit_speed(180., target, wall, 0., 0.08), WithinAbs(expected[wall], 1e-8));
+        CHECK_THAT(limit_speed(10., target, wall, 0., 0.08), WithinAbs(10., 1e-8));
+        CHECK_THAT(limit_speed(180., target, wall, 1., 0.1), WithinAbs(10., 1e-8));
     }
-    
-    REQUIRE(candidates[0].is_existing == true);
-    REQUIRE(candidates[1].is_existing == true);
-    REQUIRE(candidates[2].is_existing == false);
-    REQUIRE(candidates[3].is_existing == false);
+    CHECK_THAT(limit_speed(180., target, 100, 0., 0.08), WithinAbs(target, 1e-8));
+    CHECK_THAT(limit_speed(180., target, 100, 100., 0.08), WithinAbs(target, 1e-8));
+    CHECK_THAT(limit_speed(180., target, 0, std::numeric_limits<double>::quiet_NaN(), 0.08),
+               WithinAbs(expected.front(), 1e-8));
+    // A zero-flow seam/travel fragment must not divide by zero.
+    CHECK_THAT(limit_speed(180., target, 0, 1., 0.), WithinAbs(expected.front(), 1e-8));
 }
 
 // Test mutual exclusivity between purge_into_inner_walls and enable_prime_tower

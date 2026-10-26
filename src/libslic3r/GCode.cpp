@@ -6,6 +6,7 @@
 #include "Flow.hpp"
 #include "GCode/ThumbnailData.hpp"
 #include "GCode/ToolOrdering.hpp"
+#include "GCode/PurgeIntoInnerWalls.hpp"
 #include "GCode/SpiralVase.hpp"
 #include "GCode/PressureEqualizer.hpp"
 #include "GCode/SmallAreaInfillFlowCompensator.hpp"
@@ -7465,6 +7466,10 @@ LayerResult GCode::process_layer(
         // We are almost ready to print. However, we must go through all the objects twice to print the overridden extrusions first (infill/perimeter wiping feature):
         std::vector<ObjectByExtruder::Island::Region> by_region_per_copy_cache;
         for (int print_wipe_extrusions = is_anything_overridden; print_wipe_extrusions>=0; --print_wipe_extrusions) {
+            // Restart the slow purge ramp for this toolchange, not for each
+            // region, object, copy, or deferred-perimeter pass.
+            if (print_wipe_extrusions != 0)
+                m_purge_wall_index = 0;
             if (is_anything_overridden && print_wipe_extrusions == 0)
                 gcode+="; PURGING FINISHED\n";
 
@@ -7638,8 +7643,9 @@ LayerResult GCode::process_layer(
                         return false;
                     };
                     {
+                        const bool purge_walls = print.config().purge_into_inner_walls && print_wipe_extrusions != 0;
                         // Print perimeters of regions that has is_infill_first == false
-                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false);
+                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false, false, purge_walls);
                         if (!has_wipe_tower && need_insert_timelapse_gcode_for_traditional && printer_structure == PrinterStructure::psI3
                             && !has_insert_timelapse_gcode && has_infill(by_region_specific)) {
                             gcode += this->retract(false, false, auto_lift_type, true);
@@ -7650,9 +7656,9 @@ LayerResult GCode::process_layer(
                         // Then print infill
                         gcode += this->extrude_infill(print, by_region_specific, false);
                         // Then the walls left hanging in mid air, now that the infill can anchor them
-                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false, true);
+                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false, true, purge_walls);
                         // Then print perimeters of regions that has is_infill_first == true
-                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, true);
+                        gcode += this->extrude_perimeters(print, by_region_specific, first_layer, true, false, purge_walls);
                     }
                     // ironing
                     gcode += this->extrude_infill(print,by_region_specific, true);
@@ -8756,8 +8762,12 @@ std::string GCode::extrude_path(const ExtrusionPath& path, const std::string& de
 }
 
 // Extrude perimeters: Decide where to put seams (hide or align seams).
-std::string GCode::extrude_perimeters(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region, bool is_first_layer, bool is_infill_first, bool unsupported_loops_only)
+std::string GCode::extrude_perimeters(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region,
+                                     bool is_first_layer, bool is_infill_first, bool unsupported_loops_only, bool purge_walls)
 {
+    const bool previous_purge_wall = m_purge_wall;
+    m_purge_wall = purge_walls;
+    ScopeGuard restore_purge_wall([this, previous_purge_wall] { m_purge_wall = previous_purge_wall; });
     std::string gcode;
     for (const ObjectByExtruder::Island::Region &region : by_region)
         if (! region.perimeters.empty()) {
@@ -8795,6 +8805,8 @@ std::string GCode::extrude_perimeters(const Print &print, const std::vector<Obje
                     continue;
                 gcode += this->extrude_entity(*ee, "perimeter", -1., region.perimeters,
                                              wipe_support ? &*wipe_support : nullptr);
+                if (purge_walls)
+                    ++m_purge_wall_index;
                 if (wipe_support)
                     wipe_support->append(*ee);
             }
@@ -9448,6 +9460,23 @@ std::string GCode::_extrude(const ExtrusionPath &path, const std::string &path_d
     }
 }
     
+    // Purge overrides can use the native filament too, so tool mismatch is
+    // not a reliable test. The emission pass scopes this flag to claimed inner
+    // walls only; support, infill, exterior and unclaimed walls stay unchanged.
+    if (m_purge_wall && is_perimeter(path.role()) && !is_external_perimeter(path.role())) {
+        double target_speed = m_config.wipe_tower_max_purge_speed.value;
+        const double infill_speed = NOZZLE_CONFIG(sparse_infill_speed);
+        if (infill_speed > 0.)
+            target_speed = std::min(target_speed, infill_speed);
+        if (path_on_first_layer || object_layer_over_raft()) {
+            const double first_layer_speed = NOZZLE_CONFIG(initial_layer_speed);
+            if (first_layer_speed > 0.)
+                target_speed = std::min(target_speed, first_layer_speed);
+        }
+        speed = PurgeIntoInnerWalls::limit_speed(speed, target_speed, m_purge_wall_index,
+                                                FILAMENT_CONFIG(filament_flush_volumetric_speed), _mm3_per_mm);
+    }
+
     bool requires_segmented_extrusion = false;
     // A uniform fan state can be represented by the normal path-wide marker. Only a
     // transition within the path requires point-by-point emission.
