@@ -24,8 +24,9 @@ PurgeSupportRegion::PurgeSupportRegion(ExtrusionEntityCollection &paths, ExPolyg
 void PurgeSupportRegion::reset()
 {
     if (m_original) {
-        ExtrusionEntityCollection restored(*m_original);
-        m_paths->swap(restored);
+        // Transfer the saved native paths back; cloning would temporarily keep
+        // the grown paths and two copies of the original support alive.
+        m_paths->swap(*m_original);
         m_original.reset();
     }
     m_wall_count = m_base_wall_count;
@@ -35,9 +36,6 @@ double PurgeSupportRegion::grow(double additional_volume)
 {
     if (additional_volume <= EPSILON || m_areas.empty() || m_flow.spacing() <= EPSILON)
         return 0.;
-    if (!m_original)
-        m_original = std::make_unique<ExtrusionEntityCollection>(*m_paths);
-
     const double original_volume = m_paths->total_volume();
     const double target_volume = original_volume + additional_volume;
     double volume = original_volume;
@@ -57,13 +55,17 @@ double PurgeSupportRegion::grow(double additional_volume)
             const ExPolygons wall_band = diff_ex(offset_ex(m_areas, SCALED_EPSILON), interior);
             ExtrusionEntityCollection candidate(walls);
             candidate.no_sort = true; // support outlines before remaining fill
-            for_each_extrusion_path(*m_original, [&](const ExtrusionPath &path) {
+            for_each_extrusion_path(m_original ? *m_original : *m_paths, [&](const ExtrusionPath &path) {
                 path.subtract_expolygons(wall_band, &candidate);
             });
             const double candidate_volume = candidate.total_volume();
             // Dense first layers or narrow branches may already have as much
             // capacity as these loops. Never reduce their existing capacity.
             if (candidate_volume > volume + EPSILON) {
+                // Save the native paths only on accepted growth, transferring
+                // ownership instead of deep-copying paths we are about to replace.
+                if (!m_original)
+                    m_original = std::make_unique<ExtrusionEntityCollection>(std::move(*m_paths));
                 volume = candidate_volume;
                 m_wall_count = wall_count;
                 m_paths->swap(candidate);

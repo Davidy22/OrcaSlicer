@@ -27,13 +27,30 @@ ExPolygon support_box(double size = 20.)
                                     Point::new_scale(size, size), Point::new_scale(0., size)}));
 }
 
-ExtrusionEntityCollection sparse_support(const Flow &flow)
+class CloneCountedPath final : public ExtrusionPath
+{
+public:
+    CloneCountedPath(const ExtrusionPath &path, size_t &clones) : ExtrusionPath(path), m_clones(clones) {}
+    ExtrusionEntity *clone() const override
+    {
+        ++m_clones;
+        return new CloneCountedPath(*this);
+    }
+
+private:
+    size_t &m_clones;
+};
+
+ExtrusionEntityCollection sparse_support(const Flow &flow, size_t *clones = nullptr)
 {
     ExtrusionEntityCollection paths;
     for (const double y : {5., 10., 15.}) {
         ExtrusionPath path(erSupportMaterial, flow.mm3_per_mm(), flow.width(), flow.height());
         path.polyline = Polyline3(Polyline(Points{Point(scale_(0.1), scale_(y)), Point(scale_(19.9), scale_(y))}));
-        paths.append(std::move(path));
+        if (clones != nullptr)
+            paths.entities.emplace_back(new CloneCountedPath(path, *clones));
+        else
+            paths.append(std::move(path));
     }
     return paths;
 }
@@ -145,4 +162,43 @@ TEST_CASE("Support leaf traversal preserves loop units and nested entity identit
     REQUIRE(leaves.size() == 4);
     CHECK(leaves.front() == first);
     CHECK(dynamic_cast<const ExtrusionLoop *>(leaves.back()) != nullptr);
+}
+
+TEST_CASE("Support regions that cannot grow do not copy native paths", "[PurgeSupport][Regression][Memory]")
+{
+    const Flow flow(0.45f, 0.2f, 0.4f);
+    size_t clones = 0;
+    ExtrusionEntityCollection paths = sparse_support(flow, &clones);
+    const ExtrusionEntitiesPtr original = paths.entities;
+    // Only a subset of a support group may be safe for growth. This footprint
+    // vanishes at the first wall offset, so the native paths must stay untouched.
+    PurgeSupportRegion region(paths, ExPolygons{support_box(0.1)}, flow, 2);
+    CHECK_THAT(region.grow(10000.), WithinAbs(0., 1e-8));
+    CHECK(clones == 0);
+    region.reset();
+    CHECK(paths.entities == original);
+    CHECK(clones == 0);
+}
+
+TEST_CASE("Support replanning transfers its saved native paths instead of copying them", "[PurgeSupport][Regression][Memory]")
+{
+    const Flow flow(0.45f, 0.2f, 0.4f);
+    size_t clones = 0;
+    ExtrusionEntityCollection paths = sparse_support(flow, &clones);
+    const double native_volume = paths.total_volume();
+    const size_t native_count = paths.entities.size();
+    const ExtrusionEntitiesPtr native_paths = paths.entities;
+    PurgeSupportRegion region(paths, ExPolygons{support_box()}, flow, 1);
+    for (size_t iteration = 0; iteration < 16; ++iteration) {
+        REQUIRE(region.grow(iteration % 2 == 0 ? 1. : 10000.) > 0.);
+        CHECK(clones == 0);
+        const size_t saved_clones = clones;
+        region.reset();
+        CHECK(clones == saved_clones);
+        CHECK(paths.entities == native_paths);
+        CHECK(paths.entities.size() == native_count);
+        CHECK_THAT(paths.total_volume(), WithinAbs(native_volume, 1e-6));
+        region.reset();
+        CHECK(clones == saved_clones);
+    }
 }
