@@ -148,11 +148,7 @@ struct FilamentChangeStats
     int flush_filament_change_count{0};
     int filament_change_count{0};
 
-    // ORCA: Purge into inner walls statistics
-    float purge_inner_walls_requested_volume_mm3{0.f};
-    float purge_inner_walls_existing_volume_mm3{0.f};
-    float purge_inner_walls_extra_volume_mm3{0.f};
-    float purge_inner_walls_reduced_volume_mm3{0.f};
+    // Purge shortfall counts displayed by the slicing warning
     int purge_inner_walls_affected_layer_count{0};
     int purge_inner_walls_affected_transition_count{0};
 
@@ -160,10 +156,6 @@ struct FilamentChangeStats
         filament_flush_weight = 0;
         filament_change_count = 0;
         flush_filament_change_count = 0;
-        purge_inner_walls_requested_volume_mm3 = 0.f;
-        purge_inner_walls_existing_volume_mm3 = 0.f;
-        purge_inner_walls_extra_volume_mm3 = 0.f;
-        purge_inner_walls_reduced_volume_mm3 = 0.f;
         purge_inner_walls_affected_layer_count = 0;
         purge_inner_walls_affected_transition_count = 0;
     }
@@ -172,10 +164,6 @@ struct FilamentChangeStats
         this->filament_flush_weight += other.filament_flush_weight;
         this->filament_change_count += other.filament_change_count;
         this->flush_filament_change_count += other.flush_filament_change_count;
-        this->purge_inner_walls_requested_volume_mm3 += other.purge_inner_walls_requested_volume_mm3;
-        this->purge_inner_walls_existing_volume_mm3 += other.purge_inner_walls_existing_volume_mm3;
-        this->purge_inner_walls_extra_volume_mm3 += other.purge_inner_walls_extra_volume_mm3;
-        this->purge_inner_walls_reduced_volume_mm3 += other.purge_inner_walls_reduced_volume_mm3;
         this->purge_inner_walls_affected_layer_count += other.purge_inner_walls_affected_layer_count;
         this->purge_inner_walls_affected_transition_count += other.purge_inner_walls_affected_transition_count;
         return *this;
@@ -186,10 +174,6 @@ struct FilamentChangeStats
         ret.filament_flush_weight = this->filament_flush_weight + other.filament_flush_weight;
         ret.filament_change_count = this->filament_change_count + other.filament_change_count;
         ret.flush_filament_change_count = this->flush_filament_change_count + other.flush_filament_change_count;
-        ret.purge_inner_walls_requested_volume_mm3 = this->purge_inner_walls_requested_volume_mm3 + other.purge_inner_walls_requested_volume_mm3;
-        ret.purge_inner_walls_existing_volume_mm3 = this->purge_inner_walls_existing_volume_mm3 + other.purge_inner_walls_existing_volume_mm3;
-        ret.purge_inner_walls_extra_volume_mm3 = this->purge_inner_walls_extra_volume_mm3 + other.purge_inner_walls_extra_volume_mm3;
-        ret.purge_inner_walls_reduced_volume_mm3 = this->purge_inner_walls_reduced_volume_mm3 + other.purge_inner_walls_reduced_volume_mm3;
         ret.purge_inner_walls_affected_layer_count = this->purge_inner_walls_affected_layer_count + other.purge_inner_walls_affected_layer_count;
         ret.purge_inner_walls_affected_transition_count = this->purge_inner_walls_affected_transition_count + other.purge_inner_walls_affected_transition_count;
         return ret;

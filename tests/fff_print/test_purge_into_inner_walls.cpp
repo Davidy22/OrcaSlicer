@@ -488,7 +488,7 @@ TEST_CASE("Native shells can displace an entire layer's foreign purge capacity",
     CHECK_THAT(wiping.purge_capacity(print, 0), Catch::Matchers::WithinAbs(0., 1e-5));
     FilamentChangeStats stats;
     CHECK_THAT(wiping.mark_wiping_extrusions(print, 0, 2, 2.f, stats), Catch::Matchers::WithinAbs(2., 1e-5));
-    CHECK_THAT(stats.purge_inner_walls_reduced_volume_mm3, Catch::Matchers::WithinAbs(2., 1e-5));
+    CHECK(stats.purge_inner_walls_affected_transition_count == 1);
     CHECK(stats.purge_inner_walls_affected_layer_count == 1);
     CHECK_FALSE(wiping.is_anything_overridden()); // no phantom purge or empty destination
 }
@@ -513,21 +513,17 @@ TEST_CASE("Native shell wall growth also propagates support counts downward", "[
     bool supported_below_purge = false;
     for (size_t i = 0; i < object->layers().size(); ++i) {
         const Layer *layer = object->layers()[i];
-        const int extra = layer->regions().front()->purge_inner_wall_plan.extra_loops;
+        // Derive growth from real, closed toolpaths, not write-only planner
+        // metadata. This fixture configures one base wall on every layer.
+        int extra = 0;
+        for (const auto &candidate : layer->purge_inner_walls())
+            extra = std::max(extra, candidate.wall.collection->get_max_inset_idx());
         if (i > 0)
             CHECK(previous_extra >= extra - 1);
         previous_extra = extra;
         max_extra = std::max(max_extra, extra);
         if (layer->print_z < 1. - EPSILON && extra > 0)
             supported_below_purge = true;
-        if (extra > 0) {
-            int deepest_wall = 0;
-            for (const auto &candidate : layer->purge_inner_walls())
-                deepest_wall = std::max(deepest_wall, candidate.wall.collection->get_max_inset_idx());
-            // The 20 mm square has ample room: these must be real supporting
-            // toolpaths, not only larger numbers in the planning metadata.
-            CHECK(deepest_wall >= extra);
-        }
     }
     REQUIRE(max_extra >= 3);
     REQUIRE(supported_below_purge);

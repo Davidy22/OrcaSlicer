@@ -468,7 +468,6 @@ public:
     // ORCA: Purge into inner walls - metadata for purge wall candidates
     bool is_purge_inner_wall_candidate = false;
     bool generated_for_purge = false;
-    int purge_candidate_priority = 0;
 
     ExtrusionLoop(ExtrusionLoopRole role = elrDefault) : m_loop_role(role) {}
     ExtrusionLoop(const ExtrusionPaths &paths, ExtrusionLoopRole role = elrDefault) : paths(paths), m_loop_role(role) {}

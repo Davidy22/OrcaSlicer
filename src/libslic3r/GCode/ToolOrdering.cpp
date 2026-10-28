@@ -3567,10 +3567,6 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         }
         float remaining = requested_volume * m_purge_layer_scale;
 
-        // Track statistics
-        float total_existing_volume = 0.f;
-        float total_extra_volume = 0.f;
-
         // Consume the (possibly reduced) purge budget from objects in
         // priority order (all objects are eligible; consumption stops once
         // the budget is exhausted)
@@ -3612,11 +3608,6 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                 for (unsigned int copy = 0; copy < num_of_copies; ++copy)
                     candidates.push_back({coll, object, layerm, wall.shells, copy, coll->get_max_inset_idx(), matches_outer_wall,
                                           coll->is_existing_purge_wall(), static_cast<float>(coll->total_volume())});
-
-                if (coll->is_existing_purge_wall())
-                    total_existing_volume += float(coll->total_volume()) * float(num_of_copies);
-                else
-                    total_extra_volume += float(coll->total_volume()) * float(num_of_copies);
             }
 
             // Preserve copy order for equal spatial priorities. This also
@@ -3688,10 +3679,6 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         const float shortfall = std::max(0.f, requested_volume - purge_consumed);
 
         // Update statistics
-        stats.purge_inner_walls_requested_volume_mm3 += requested_volume;
-        stats.purge_inner_walls_existing_volume_mm3 += total_existing_volume;
-        stats.purge_inner_walls_extra_volume_mm3 += total_extra_volume;
-        stats.purge_inner_walls_reduced_volume_mm3 += shortfall;
         if (shortfall > 0.f) {
             ++stats.purge_inner_walls_affected_transition_count;
             if (!m_purge_shortfall_counted) {

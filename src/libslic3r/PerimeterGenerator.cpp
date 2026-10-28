@@ -260,7 +260,6 @@ static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perime
             // (which the purge capacity planning bumps per surface); mark them as
             // generated for purge so regular walls are consumed first at allocation.
             loop_obj.generated_for_purge = int(loop.depth) >= perimeter_generator.config->wall_loops.value;
-            loop_obj.purge_candidate_priority = 1000 + loop.depth;
         }
         coll.append(std::move(loop_obj));
     }
@@ -586,7 +585,6 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
                     // See traverse_loops(): loops at wall_loops and deeper come
                     // from extra_perimeters, i.e. from the purge capacity planning.
                     extrusion_loop.generated_for_purge = int(extrusion->inset_idx) >= perimeter_generator.config->wall_loops.value;
-                    extrusion_loop.purge_candidate_priority = 1000 + extrusion->inset_idx;
                 }
                 
                 if ((perimeter_generator.config->wall_direction == WallDirection::CounterClockwise) ==

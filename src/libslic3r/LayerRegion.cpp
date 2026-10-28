@@ -180,22 +180,7 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     // ORCA: Purge into inner walls capacity planning is driven by
     // PrintObject::make_perimeters(): it measures the purge candidate volume
     // of the perimeters generated here and regenerates layers that need
-    // extra inner wall loops (see purge_candidate_volume() below).
-}
-
-// ORCA: Purge into inner walls - volume of the generated inner walls that are
-// tagged as purge candidates (single copy). The purge allocation overrides
-// whole collections, so measure whole candidate collections, exactly like
-// WipingExtrusions::mark_wiping_extrusions() accounts them.
-float LayerRegion::purge_candidate_volume() const
-{
-    float volume = 0.f;
-    for (const ExtrusionEntity* ee : this->perimeters.entities) {
-        auto* coll = dynamic_cast<const ExtrusionEntityCollection*>(ee);
-        if (coll && coll->is_purge_inner_wall_candidate())
-            volume += float(coll->total_volume());
-    }
-    return volume;
+    // extra inner wall loops.
 }
 
 // ORCA: Purge into inner walls - take extra_loops more inner wall loops into
@@ -227,7 +212,7 @@ void LayerRegion::apply_purge_extra_perimeters(int extra_loops)
 // additional loops. Marching stops early once volume_cap is reached; without
 // a cap hit the vector ends where every surface of this region has turned
 // solid (offsets vanished). This only sizes the loop count - the generated
-// volume is re-measured with purge_candidate_volume() after regeneration.
+// volume is re-measured from the generated walls after regeneration.
 std::vector<float> LayerRegion::purge_extra_loop_cumulative_volumes(int already_added_loops, float volume_cap) const
 {
     std::vector<float> cumulative;

@@ -165,7 +165,6 @@ public:
         std::vector<const ExtrusionEntityCollection *> shells;
         bool is_shell() const { return shells.size() == 1 && shells.front() == collection; }
     };
-    std::vector<PurgeInnerWall> purge_inner_walls() const;
     static std::vector<PurgeInnerWall> purge_inner_walls(const std::vector<const ExtrusionEntityCollection *> &collections);
     bool is_existing_purge_wall() const;
     int get_max_inset_idx() const;

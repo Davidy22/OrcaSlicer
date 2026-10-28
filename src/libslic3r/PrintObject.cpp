@@ -722,11 +722,8 @@ void PrintObject::make_perimeters()
                 }
                 return volume;
             };
-            for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx) {
+            for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx)
                 measured[layer_idx] = measure_layer(layer_idx);
-                for (LayerRegion *layerm : m_layers[layer_idx]->regions())
-                    layerm->purge_inner_wall_plan.existing_inner_wall_volume_mm3 = layerm->purge_candidate_volume();
-            }
 
             // Grow loops, propagate the wall counts downward, regenerate and
             // re-measure. The offset projection is an estimate, so allow a
@@ -795,21 +792,6 @@ void PrintObject::make_perimeters()
                 m_print->throw_if_canceled();
                 for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx)
                     measured[layer_idx] = measure_layer(layer_idx);
-            }
-
-            for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx) {
-                const bool capacity_limited = measured[layer_idx] < demand[layer_idx];
-                std::map<const LayerRegion *, float> foreign_capacity;
-                for (const auto &candidate : m_layers[layer_idx]->purge_inner_walls())
-                    if (!candidate.wall.is_shell())
-                        foreign_capacity[candidate.region] += float(candidate.wall.collection->total_volume());
-                for (LayerRegion *layerm : m_layers[layer_idx]->regions()) {
-                    auto &plan                = layerm->purge_inner_wall_plan;
-                    plan.extra_loops          = extra_loops[layer_idx];
-                    plan.target_volume_mm3    = demand[layer_idx]; // assigned share, whole layer (all copies)
-                    plan.planned_volume_mm3   = foreign_capacity[layerm];
-                    plan.capacity_limited     = capacity_limited;
-                }
             }
         }
     }

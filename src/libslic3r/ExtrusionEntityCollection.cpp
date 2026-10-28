@@ -199,15 +199,6 @@ void ExtrusionEntityCollection::split_purge_inner_walls()
     entities.swap(separated.entities);
 }
 
-std::vector<ExtrusionEntityCollection::PurgeInnerWall> ExtrusionEntityCollection::purge_inner_walls() const
-{
-    std::vector<const ExtrusionEntityCollection *> collections;
-    for (const ExtrusionEntity *entity : entities)
-        if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity))
-            collections.push_back(collection);
-    return purge_inner_walls(collections);
-}
-
 std::vector<ExtrusionEntityCollection::PurgeInnerWall> ExtrusionEntityCollection::purge_inner_walls(
     const std::vector<const ExtrusionEntityCollection *> &collections)
 {

@@ -6,14 +6,12 @@
 
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/GCode/PurgeIntoInnerWalls.hpp"
+#include "libslic3r/GCode/ToolOrdering.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/libslic3r.h"
-#include "libslic3r/TriangleMesh.hpp"
-#include "libslic3r/Model.hpp"
-#include "libslic3r/Print.hpp"
 
 #include <vector>
 #include <algorithm>
@@ -50,6 +48,14 @@ ExtrusionLoop native_shell_test_wall(int inset, double min_x, double min_y, doub
     loop.set_loop_role(hole ? elrHole : elrDefault);
     return loop;
 }
+std::vector<ExtrusionEntityCollection::PurgeInnerWall> purge_test_walls(const ExtrusionEntityCollection &perimeters)
+{
+    std::vector<const ExtrusionEntityCollection *> collections;
+    for (const ExtrusionEntity *entity : perimeters.entities)
+        if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity))
+            collections.push_back(collection);
+    return ExtrusionEntityCollection::purge_inner_walls(collections);
+}
 } // namespace
 
 // Test that ExtrusionLoop purge metadata is properly set
@@ -67,17 +73,14 @@ TEST_CASE("ExtrusionLoop purge metadata", "[PurgeIntoInnerWalls]")
     ExtrusionLoop loop(std::move(paths), elrDefault);
     REQUIRE(loop.is_purge_inner_wall_candidate == false);
     REQUIRE(loop.generated_for_purge == false);
-    REQUIRE(loop.purge_candidate_priority == 0);
     
     // Test setting purge candidate metadata
     loop.is_purge_inner_wall_candidate = true;
     loop.generated_for_purge = false;
-    loop.purge_candidate_priority = 1005;
     loop.inset_idx = 2;
     
     REQUIRE(loop.is_purge_inner_wall_candidate == true);
     REQUIRE(loop.generated_for_purge == false);
-    REQUIRE(loop.purge_candidate_priority == 1005);
     REQUIRE(loop.inset_idx == 2);
 }
 
@@ -104,7 +107,6 @@ TEST_CASE("ExtrusionEntityCollection purge candidate detection", "[PurgeIntoInne
     loop.is_purge_inner_wall_candidate = true;
     loop.generated_for_purge = false;  // existing wall
     loop.inset_idx = 2;
-    loop.purge_candidate_priority = 1002;
     coll.append(std::move(loop));
     
     // Verify detection
@@ -125,7 +127,6 @@ TEST_CASE("ExtrusionEntityCollection purge candidate detection", "[PurgeIntoInne
     loop2.is_purge_inner_wall_candidate = true;
     loop2.generated_for_purge = true;  // extra wall
     loop2.inset_idx = 3;
-    loop2.purge_candidate_priority = 5;
     coll.append(std::move(loop2));
     
     // Verify mixed detection
@@ -291,36 +292,6 @@ TEST_CASE("Purge wall priority follows exterior filament and inset depth", "[Pur
     CHECK(wall_priority(true, 2, true, 20.f) > wall_priority(true, 2, true, 1.f));
 }
 
-// Test that objects with purge_into_inner_walls are prioritized
-TEST_CASE("Object purge prioritization", "[PurgeIntoInnerWalls]")
-{
-    // Test that objects with purge_into_inner_walls are prioritized
-    // This test verifies the sorting logic concept without creating full Model/PrintObject structures
-    
-    struct MockObject {
-        int id;
-        bool purge_enabled;
-    };
-    
-    std::vector<MockObject> objects = {
-        {0, true},   // purge enabled
-        {1, false},  // purge disabled
-    };
-    
-    // When sorted for purge allocation, object with purge enabled should come first
-    std::sort(objects.begin(), objects.end(), [](const MockObject& a, const MockObject& b) {
-        if (a.purge_enabled != b.purge_enabled)
-            return a.purge_enabled;  // true comes before false
-        return a.id < b.id;
-    });
-    
-    // Object with purge enabled should be first
-    REQUIRE(objects[0].purge_enabled == true);
-    REQUIRE(objects[0].id == 0);
-    REQUIRE(objects[1].purge_enabled == false);
-    REQUIRE(objects[1].id == 1);
-}
-
 TEST_CASE("Purge wall speed ramps without exceeding existing speed or flow limits", "[PurgeIntoInnerWalls][Regression]")
 {
     using PurgeIntoInnerWalls::limit_speed;
@@ -400,7 +371,7 @@ TEST_CASE("Native shell reservations distinguish islands and hole boundaries", "
         perimeters.append(std::move(loop));
     }
     perimeters.split_purge_inner_walls();
-    const auto walls = perimeters.purge_inner_walls();
+    const auto walls = purge_test_walls(perimeters);
     REQUIRE(walls.size() == 6);
     size_t native_shells = 0, foreign_walls = 0;
     for (const auto &wall : walls) {
@@ -433,7 +404,7 @@ TEST_CASE("Merged hole purge walls preserve each hole's native shell", "[PurgeIn
     perimeters.append(native_shell_test_wall(1, 8., 4., 10., 6., true));
     perimeters.append(native_shell_test_wall(2, 3., 3., 11., 7., true));
     perimeters.split_purge_inner_walls();
-    const auto walls = perimeters.purge_inner_walls();
+    const auto walls = purge_test_walls(perimeters);
     REQUIRE(walls.size() == 3);
     CHECK(walls[0].is_shell());
     CHECK(walls[1].is_shell());
@@ -453,7 +424,7 @@ TEST_CASE("A sole inner wall reserves all of its space for the native shell", "[
     perimeters.append(native_shell_test_wall(0, 0., 0., 10., 10.));
     perimeters.append(native_shell_test_wall(1, 1., 1., 9., 9.));
     perimeters.split_purge_inner_walls();
-    const auto walls = perimeters.purge_inner_walls();
+    const auto walls = purge_test_walls(perimeters);
     REQUIRE(walls.size() == 1);
     CHECK(walls.front().is_shell());
     CHECK(walls.front().collection->total_volume() > 0.);
@@ -504,5 +475,39 @@ TEST_CASE("Native shell planning rejects unclosed or disconnected purge loops", 
     ExtrusionEntityCollection perimeters;
     perimeters.append(std::move(loop));
     perimeters.split_purge_inner_walls();
-    CHECK(perimeters.purge_inner_walls().empty());
+    CHECK(purge_test_walls(perimeters).empty());
+}
+
+TEST_CASE("Purge shortfall counts follow filament statistics aggregation", "[PurgeIntoInnerWalls][Regression]")
+{
+    FilamentChangeStats first, second;
+    first.filament_flush_weight = 3;
+    first.flush_filament_change_count = 4;
+    first.filament_change_count = 5;
+    first.purge_inner_walls_affected_layer_count = 6;
+    first.purge_inner_walls_affected_transition_count = 7;
+    second.filament_flush_weight = 10;
+    second.flush_filament_change_count = 20;
+    second.filament_change_count = 30;
+    second.purge_inner_walls_affected_layer_count = 40;
+    second.purge_inner_walls_affected_transition_count = 50;
+
+    const auto check_sum = [](const FilamentChangeStats &stats) {
+        CHECK(stats.filament_flush_weight == 13);
+        CHECK(stats.flush_filament_change_count == 24);
+        CHECK(stats.filament_change_count == 35);
+        CHECK(stats.purge_inner_walls_affected_layer_count == 46);
+        CHECK(stats.purge_inner_walls_affected_transition_count == 57);
+    };
+    check_sum(first + second);
+    CHECK(first.purge_inner_walls_affected_layer_count == 6);
+    CHECK(first.purge_inner_walls_affected_transition_count == 7);
+    first += second;
+    check_sum(first);
+    first.clear();
+    CHECK(first.filament_flush_weight == 0);
+    CHECK(first.flush_filament_change_count == 0);
+    CHECK(first.filament_change_count == 0);
+    CHECK(first.purge_inner_walls_affected_layer_count == 0);
+    CHECK(first.purge_inner_walls_affected_transition_count == 0);
 }

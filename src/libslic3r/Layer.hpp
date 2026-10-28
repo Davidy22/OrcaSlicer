@@ -32,8 +32,6 @@ class PrintRegion;
 class PrintRegionConfig;
 class PrintObject;
 class Print;
-class PrintConfig;
-class PrintObjectConfig;
 
 namespace FillAdaptive {
     struct RegionOctrees;
@@ -92,18 +90,6 @@ public:
     // (this collection contains only ExtrusionEntityCollection objects)
     ExtrusionEntityCollection   fills;
 
-    // ORCA: Purge into inner walls - plan for extra purge walls on this layer
-    struct PurgeInnerWallPlan {
-        int extra_loops = 0;
-        float existing_inner_wall_volume_mm3 = 0.f;
-        float target_volume_mm3 = 0.f;
-        // Foreign-purge capacity after reserving the native inner shell.
-        // Matching purge may additionally use the reserved shell itself.
-        float planned_volume_mm3 = 0.f;
-        bool capacity_limited = false;
-    };
-    PurgeInnerWallPlan purge_inner_wall_plan;
-
     Flow    flow(FlowRole role) const;
     Flow    flow(FlowRole role, double layer_height) const;
     Flow    bridging_flow(FlowRole role, bool thick_bridge = false) const;
@@ -114,8 +100,6 @@ public:
     void    make_perimeters(const SurfaceCollection &slices, const LayerRegionPtrs &compatible_regions, SurfaceCollection* fill_surfaces, ExPolygons* fill_no_overlap);
     // ORCA: Purge into inner walls - capacity planning helpers, driven by
     // PrintObject::make_perimeters() once perimeters have been generated.
-    // Volume (mm3, single copy) of generated inner walls tagged as purge candidates.
-    float   purge_candidate_volume() const;
     // Cumulative volume (mm3, single copy) that 1, 2, ... additional inner wall
     // loops would add on top of the wall_loops + already_added_loops loops that
     // exist (or are already planned); marching stops early once volume_cap is
