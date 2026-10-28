@@ -5532,13 +5532,14 @@ void Print::_plan_purge_into_inner_walls()
     });
     unsigned int previous_extruder = m_wipe_tower_data.tool_ordering.first_extruder();
     for (LayerTools &tools : m_wipe_tower_data.tool_ordering.layer_tools()) {
+        const unsigned int initial_extruder = previous_extruder;
         double demand = 0.;
         for (const unsigned int extruder : tools.extruders) {
             if (WipingExtrusions::can_purge(m_config, previous_extruder, extruder))
                 demand += estimate_flush_volume(m_config, previous_extruder, extruder);
             previous_extruder = extruder;
         }
-        double deficit = demand - tools.wiping_extrusions().purge_capacity(*this);
+        double deficit = demand - tools.wiping_extrusions().purge_capacity(*this, initial_extruder);
         if (deficit <= EPSILON)
             continue;
 

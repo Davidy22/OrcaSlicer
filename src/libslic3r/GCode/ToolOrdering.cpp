@@ -3354,6 +3354,14 @@ void WipingExtrusions::set_extruder_override(const ExtrusionEntity* entity, cons
     copies_vector[copy_id] = extruder;
 }
 
+void WipingExtrusions::set_native_extruder_override(const ExtrusionEntity* entity, const PrintObject* object, size_t copy_id, int extruder, size_t num_of_copies)
+{
+    something_overridden = true;
+    auto &copies = native_entity_map[std::make_tuple(entity, object)];
+    copies.resize(num_of_copies, -1);
+    copies[copy_id] = extruder;
+}
+
 // BBS
 void WipingExtrusions::set_support_extruder_override(const PrintObject* object, size_t copy_id, int extruder, size_t num_of_copies)
 {
@@ -3458,23 +3466,47 @@ int WipingExtrusions::get_extruder_override(const ExtrusionEntity* entity, const
     return it != entity_map.end() && copy_id < it->second.size() ? std::max(-1, int(it->second[copy_id])) : -1;
 }
 
-float WipingExtrusions::purge_capacity(const Print& print) const
+int WipingExtrusions::get_native_extruder_override(const ExtrusionEntity* entity, const PrintObject* object, size_t copy_id) const
+{
+    const auto it = native_entity_map.find(std::make_tuple(entity, object));
+    return it != native_entity_map.end() && copy_id < it->second.size() ? it->second[copy_id] : -1;
+}
+
+float WipingExtrusions::purge_capacity(const Print& print, unsigned int initial_extruder) const
 {
     float capacity = 0.f;
+    std::map<unsigned int, float> shell_capacity;
     for (const PrintObject *object : print.objects()) {
         const float copies = float(object->instances().size());
         if (const Layer *layer = object->get_layer_at_printz(m_layer_tools->print_z, EPSILON))
-            for (const LayerRegion *region : layer->regions())
-                for (const ExtrusionEntity *entity : region->perimeters.entities)
-                    if (const auto *walls = dynamic_cast<const ExtrusionEntityCollection *>(entity))
-                        if (is_overriddable(*walls, print.config(), *object, region->region()))
-                            capacity += float(walls->total_volume()) * copies;
+            for (const auto &candidate : layer->purge_inner_walls()) {
+                const auto &wall = candidate.wall;
+                if (!is_overriddable(*wall.collection, print.config(), *object, candidate.region->region()))
+                    continue;
+                const float volume = float(wall.collection->total_volume()) * copies;
+                if (wall.is_shell())
+                    shell_capacity[m_layer_tools->wall_extruder_id(candidate.region->region())] += volume;
+                else
+                    capacity += volume;
+            }
         if (const SupportLayer *support = object->get_support_layer_at_printz(m_layer_tools->print_z, EPSILON))
             for_each_extrusion_leaf(support->support_fills, [&](const ExtrusionEntity &entity) {
                 if (is_support_overriddable(entity.role(), *object))
                     capacity += float(entity.total_volume()) * copies;
             });
     }
+    // The reserved shell can itself absorb purge of its exterior filament.
+    // Credit only that filament's requested volume, never the same space for
+    // foreign purge. In particular a thin, solid region may lose ALL foreign
+    // capacity when its sole inner wall becomes the native shell.
+    std::map<unsigned int, float> matching_demand;
+    for (const unsigned int extruder : m_layer_tools->extruders) {
+        if (can_purge(print.config(), initial_extruder, extruder))
+            matching_demand[extruder] += estimate_flush_volume(print.config(), initial_extruder, extruder);
+        initial_extruder = extruder;
+    }
+    for (const auto &[extruder, volume] : shell_capacity)
+        capacity += std::min(volume, matching_demand[extruder]);
     return capacity;
 }
 
@@ -3523,7 +3555,7 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         // Print::_plan_purge_into_inner_walls(). Computed lazily on the
         // layer's first toolchange, before any of its walls are overridden.
         if (m_purge_layer_scale < 0.f) {
-            const float capacity = purge_capacity(print);
+            const float capacity = purge_capacity(print, unsigned(m_purge_initial_extruder));
             float layer_demand = 0.f;
             unsigned int prev_extruder = unsigned(m_purge_initial_extruder);
             for (const unsigned int extruder_id : lt.extruders) {
@@ -3553,6 +3585,8 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
             struct PurgeCandidate {
                 const ExtrusionEntityCollection* collection;
                 const PrintObject* object;
+                const LayerRegion* region;
+                std::vector<const ExtrusionEntityCollection *> shells;
                 unsigned int copy;
                 int inset_idx;
                 bool matches_outer_wall;
@@ -3561,28 +3595,34 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
             };
             std::vector<PurgeCandidate> candidates;
 
-            for (unsigned int copy = 0; copy < num_of_copies; ++copy) {
-                for (const LayerRegion *layerm : this_layer->regions()) {
-                    for (const ExtrusionEntity* ee : layerm->perimeters.entities) {
-                        auto* coll = dynamic_cast<const ExtrusionEntityCollection*>(ee);
-                        if (!coll || !is_overriddable(*coll, print.config(), *object, layerm->region()))
-                            continue;
+            // Group once per object/layer, not once per copy. Shells may live
+            // in another compatible region after merged perimeter generation.
+            for (const auto &candidate : this_layer->purge_inner_walls()) {
+                const LayerRegion *layerm = candidate.region;
+                const auto &wall = candidate.wall;
+                const auto *coll = wall.collection;
+                if (!is_overriddable(*coll, print.config(), *object, layerm->region()))
+                    continue;
 
-                        // Use the exterior's filament, not the inner-wall filament:
-                        // region overrides may deliberately make those different.
-                        const bool matches_outer_wall = lt.wall_extruder_id(layerm->region()) == new_extruder;
-                        candidates.push_back({coll, object, copy, coll->get_max_inset_idx(), matches_outer_wall,
-                                              coll->is_existing_purge_wall(), static_cast<float>(coll->total_volume())});
+                // Matching purge already supplies a native inner wall.
+                // A foreign change may only use the walls behind it.
+                const bool matches_outer_wall = lt.wall_extruder_id(layerm->region()) == new_extruder;
+                if (wall.is_shell() && !matches_outer_wall)
+                    continue;
+                for (unsigned int copy = 0; copy < num_of_copies; ++copy)
+                    candidates.push_back({coll, object, layerm, wall.shells, copy, coll->get_max_inset_idx(), matches_outer_wall,
+                                          coll->is_existing_purge_wall(), static_cast<float>(coll->total_volume())});
 
-                      if (coll->is_existing_purge_wall())
-                          total_existing_volume += static_cast<float>(coll->total_volume());
-                      else
-                          total_extra_volume += static_cast<float>(coll->total_volume());
-                    }
-                }
+                if (coll->is_existing_purge_wall())
+                    total_existing_volume += float(coll->total_volume()) * float(num_of_copies);
+                else
+                    total_extra_volume += float(coll->total_volume()) * float(num_of_copies);
             }
 
-            std::sort(candidates.begin(), candidates.end(), [](const PurgeCandidate& a, const PurgeCandidate& b) {
+            // Preserve copy order for equal spatial priorities. This also
+            // keeps a small matching purge and a later foreign purge on the
+            // same copy instead of unnecessarily shielding a different copy.
+            std::stable_sort(candidates.begin(), candidates.end(), [](const PurgeCandidate& a, const PurgeCandidate& b) {
                 return PurgeIntoInnerWalls::wall_priority(a.matches_outer_wall, a.inset_idx, a.is_existing, a.volume) >
                        PurgeIntoInnerWalls::wall_priority(b.matches_outer_wall, b.inset_idx, b.is_existing, b.volume);
             });
@@ -3593,6 +3633,23 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                 if (is_entity_overridden(cand.collection, cand.object, cand.copy))
                     continue;
 
+                // Only copies/boundaries that actually receive purge need
+                // native routing. Matching purge on the shell already supplies
+                // that wall; otherwise its unclaimed neighbors must stay native,
+                // even when their region selects a different inner filament.
+                const unsigned int outer = lt.wall_extruder_id(cand.region->region());
+                for (const auto *shell : cand.shells)
+                    if (shell != cand.collection && !is_entity_overridden(shell, object, cand.copy))
+                        set_native_extruder_override(shell, object, cand.copy, int(outer), num_of_copies);
+                // A later matching change may claim a shell previously
+                // reserved for normal printing. It now supplies the shell as
+                // purge: drop only this copy's ordinary reservation.
+                auto native = native_entity_map.find(std::make_tuple(cand.collection, cand.object));
+                if (native != native_entity_map.end()) {
+                    native->second[cand.copy] = -1;
+                    if (std::all_of(native->second.begin(), native->second.end(), [](int extruder) { return extruder < 0; }))
+                        native_entity_map.erase(native);
+                }
                 set_extruder_override(cand.collection, cand.object, cand.copy, new_extruder, num_of_copies);
                 float consumed = cand.volume;
                 remaining -= consumed;
@@ -3852,13 +3909,22 @@ void WipingExtrusions::ensure_perimeters_infills_order(const Print& print)
 const WipingExtrusions::ExtruderPerCopy* WipingExtrusions::get_extruder_overrides(const ExtrusionEntity* entity, const PrintObject* object, int correct_extruder_id, size_t num_of_copies)
 {
 	ExtruderPerCopy *overrides = nullptr;
-    auto entity_map_it = entity_map.find(std::make_tuple(entity, object));
+    const auto key = std::make_tuple(entity, object);
+    auto entity_map_it = entity_map.find(key);
+    if (entity_map_it == entity_map.end() && native_entity_map.find(key) != native_entity_map.end())
+        entity_map_it = entity_map.emplace(key, ExtruderPerCopy()).first;
     if (entity_map_it != entity_map.end()) {
         overrides = &entity_map_it->second;
-    	overrides->resize(num_of_copies, -1);
-	    // Each -1 now means "print as usual" - we will replace it with actual extruder id (shifted it so we don't lose that information):
-	    std::replace(overrides->begin(), overrides->end(), -1, -correct_extruder_id-1);
-	}
+        overrides->resize(num_of_copies, -1);
+        // Negative ids select the NORMAL-print pass, unlike positive purge
+        // claims. Preserve the per-copy shell color, including tool zero (-1),
+        // instead of replacing it with the configured inner-wall filament.
+        for (size_t copy = 0; copy < num_of_copies; ++copy)
+            if ((*overrides)[copy] == -1) {
+                const int native = get_native_extruder_override(entity, object, copy);
+                (*overrides)[copy] = -(native < 0 ? correct_extruder_id : native) - 1;
+            }
+    }
     return overrides;
 }
 

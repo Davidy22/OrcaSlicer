@@ -302,7 +302,7 @@ TEST_CASE("Protected material changes do not add a fictitious purge transition",
     tools.extruders = {0, 2, 1, 3};
     WipingExtrusions &wiping = tools.wiping_extrusions();
     REQUIRE(wiping.is_support_overriddable_and_mark(erMixed, *print.objects().front()));
-    const float capacity = wiping.purge_capacity(print);
+    const float capacity = wiping.purge_capacity(print, 2);
     REQUIRE(capacity > 0.f);
     const float demand = capacity * 0.75f;
     config.set_deserialize_strict({{"prime_volume", double(demand)}});

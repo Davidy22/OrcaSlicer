@@ -40,6 +40,16 @@ ExtrusionLoop purge_test_loop(ExtrusionRole role, int inset, bool generated = fa
     loop.generated_for_purge = generated;
     return loop;
 }
+
+ExtrusionLoop native_shell_test_wall(int inset, double min_x, double min_y, double max_x, double max_y, bool hole = false)
+{
+    ExtrusionLoop loop = purge_test_loop(inset == 0 ? erExternalPerimeter : erPerimeter, inset);
+    loop.paths.front().polyline = Polyline3(Polyline(Points{
+        Point::new_scale(min_x, min_y), Point::new_scale(max_x, min_y), Point::new_scale(max_x, max_y),
+        Point::new_scale(min_x, max_y), Point::new_scale(min_x, min_y)}));
+    loop.set_loop_role(hole ? elrHole : elrDefault);
+    return loop;
+}
 } // namespace
 
 // Test that ExtrusionLoop purge metadata is properly set
@@ -364,4 +374,135 @@ TEST_CASE("Mutual exclusivity purge vs prime tower", "[PurgeIntoInnerWalls]")
     
     REQUIRE(config.option("purge_into_inner_walls")->getBool() == false);
     REQUIRE(config.option("enable_prime_tower")->getBool() == true);
+}
+
+
+TEST_CASE("Native shell reservations distinguish islands and hole boundaries", "[PurgeIntoInnerWalls][Regression]")
+{
+    const bool clockwise = GENERATE(false, true);
+    ExtrusionEntityCollection perimeters;
+    std::vector<ExtrusionLoop> loops{
+        native_shell_test_wall(2, 1., 1., 19., 19.),
+        native_shell_test_wall(1, 30., 0., 50., 20.),
+        native_shell_test_wall(0, -1., -1., 21., 21.),
+        native_shell_test_wall(2, 5., 5., 9., 9., true),
+        native_shell_test_wall(1, 0., 0., 20., 20.),
+        native_shell_test_wall(2, 31., 1., 49., 19.),
+        native_shell_test_wall(1, 6., 6., 8., 8., true),
+    };
+    for (auto &loop : loops) {
+        // Boundary identity comes from loop_role, not winding: Orca lets the
+        // user reverse wall direction and overhangs may reverse it per layer.
+        if (clockwise)
+            loop.make_clockwise();
+        else
+            loop.make_counter_clockwise();
+        perimeters.append(std::move(loop));
+    }
+    perimeters.split_purge_inner_walls();
+    const auto walls = perimeters.purge_inner_walls();
+    REQUIRE(walls.size() == 6);
+    size_t native_shells = 0, foreign_walls = 0;
+    for (const auto &wall : walls) {
+        const auto *loop = dynamic_cast<const ExtrusionLoop *>(wall.collection->entities.front());
+        REQUIRE(loop != nullptr);
+        const bool far_island = loop->first_point().x() >= scale_(30.);
+        if (wall.is_shell()) {
+            ++native_shells;
+            CHECK(loop->inset_idx == 1);
+        } else {
+            ++foreign_walls;
+            // Protect both visible sides of the material if contour and hole
+            // walls merge deeper inside. The disconnected island stays separate.
+            CHECK(wall.shells.size() == (far_island ? 1 : 2));
+            for (const auto *shell : wall.shells) {
+                CHECK(shell->get_max_inset_idx() == 1);
+                CHECK((shell->first_point().x() >= scale_(30.)) == far_island);
+                CHECK(shell != wall.collection);
+            }
+        }
+    }
+    CHECK(native_shells == 3);
+    CHECK(foreign_walls == 3);
+}
+
+TEST_CASE("Merged hole purge walls preserve each hole's native shell", "[PurgeIntoInnerWalls][Regression]")
+{
+    ExtrusionEntityCollection perimeters;
+    perimeters.append(native_shell_test_wall(1, 4., 4., 6., 6., true));
+    perimeters.append(native_shell_test_wall(1, 8., 4., 10., 6., true));
+    perimeters.append(native_shell_test_wall(2, 3., 3., 11., 7., true));
+    perimeters.split_purge_inner_walls();
+    const auto walls = perimeters.purge_inner_walls();
+    REQUIRE(walls.size() == 3);
+    CHECK(walls[0].is_shell());
+    CHECK(walls[1].is_shell());
+    CHECK_FALSE(walls[2].is_shell());
+    REQUIRE(walls[2].shells.size() == 2);
+    CHECK(walls[2].shells[0] == walls[0].collection);
+    CHECK(walls[2].shells[1] == walls[1].collection);
+    // The shared deeper wall is counted only once, not once per hole.
+    const double foreign_volume = walls[2].collection->total_volume();
+    CHECK_THAT(perimeters.total_volume() - walls[0].collection->total_volume() - walls[1].collection->total_volume(),
+               Catch::Matchers::WithinAbs(foreign_volume, 1e-6));
+}
+
+TEST_CASE("A sole inner wall reserves all of its space for the native shell", "[PurgeIntoInnerWalls][Regression]")
+{
+    ExtrusionEntityCollection perimeters;
+    perimeters.append(native_shell_test_wall(0, 0., 0., 10., 10.));
+    perimeters.append(native_shell_test_wall(1, 1., 1., 9., 9.));
+    perimeters.split_purge_inner_walls();
+    const auto walls = perimeters.purge_inner_walls();
+    REQUIRE(walls.size() == 1);
+    CHECK(walls.front().is_shell());
+    CHECK(walls.front().collection->total_volume() > 0.);
+    double foreign_capacity = 0.;
+    for (const auto &wall : walls)
+        if (!wall.is_shell())
+            foreign_capacity += wall.collection->total_volume();
+    CHECK_THAT(foreign_capacity, Catch::Matchers::WithinAbs(0., 1e-6));
+}
+
+TEST_CASE("Native shells follow walls across compatible region collections", "[PurgeIntoInnerWalls][Regression]")
+{
+    ExtrusionEntityCollection first_region, second_region;
+    first_region.append(native_shell_test_wall(1, 0., 0., 20., 20.));
+    second_region.append(native_shell_test_wall(2, 1., 1., 19., 19.));
+    first_region.split_purge_inner_walls();
+    second_region.split_purge_inner_walls();
+    const auto *shell = dynamic_cast<const ExtrusionEntityCollection *>(first_region.entities.front());
+    const auto *purge = dynamic_cast<const ExtrusionEntityCollection *>(second_region.entities.front());
+    REQUIRE(shell != nullptr);
+    REQUIRE(purge != nullptr);
+    const auto walls = ExtrusionEntityCollection::purge_inner_walls({purge, shell});
+    REQUIRE(walls.size() == 2);
+    CHECK(walls[0].is_shell());
+    CHECK_FALSE(walls[1].is_shell());
+    REQUIRE(walls[1].shells.size() == 1);
+    CHECK(walls[1].shells.front() == shell);
+    CHECK(walls[1].collection == purge);
+}
+
+
+TEST_CASE("Native shell planning rejects unclosed or disconnected purge loops", "[PurgeIntoInnerWalls][Regression]")
+{
+    const int invalid_geometry = GENERATE(0, 1, 2);
+    ExtrusionLoop loop = native_shell_test_wall(1, 0., 0., 20., 20.);
+    if (invalid_geometry == 0)
+        loop.paths.front().polyline.points.clear();
+    else if (invalid_geometry == 1)
+        loop.paths.front().polyline.points.pop_back();
+    else {
+        // The endpoints close, but the middle is missing a segment.
+        ExtrusionPath tail = loop.paths.front();
+        auto &head_points = loop.paths.front().polyline.points;
+        head_points.erase(head_points.begin() + 2, head_points.end());
+        tail.polyline.points.erase(tail.polyline.points.begin(), tail.polyline.points.begin() + 2);
+        loop.paths.push_back(std::move(tail));
+    }
+    ExtrusionEntityCollection perimeters;
+    perimeters.append(std::move(loop));
+    perimeters.split_purge_inner_walls();
+    CHECK(perimeters.purge_inner_walls().empty());
 }

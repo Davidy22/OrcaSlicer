@@ -14,6 +14,7 @@
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Point.hpp"
+#include "libslic3r/Polygon.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -22,10 +23,12 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cmath>
 #include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
+#include <utility>
 
 using namespace Slic3r;
 
@@ -400,4 +403,211 @@ TEST_CASE("Only purge-designated inner walls use purge speeds in exported G-code
             REQUIRE(flow_checks > 0);
     } else
         CHECK(purge_moves == 0);
+}
+
+TEST_CASE("Purge reserves a native inner shell independently for each copy", "[PurgeIntoInnerWalls][Regression]")
+{
+    const char *generator = GENERATE("classic", "arachne");
+    const int matching_order = GENERATE(0, 1, 2); // absent, before foreign purge, or after it
+    Model model;
+    Print print;
+    DynamicPrintConfig config = purge_config(generator, 3, false, 3);
+    config.set_deserialize_strict({{"prime_volume", 1.}, {"inner_wall_filament_id", 2}});
+    init_purge_print(print, model, config, true, 2);
+    print.process();
+    const PrintObject *object = print.objects().front();
+    const Layer *layer = object->layers().at(1);
+    LayerTools tools(layer->print_z);
+    tools.extruders = matching_order == 0 ? std::vector<unsigned int>{1} :
+                      matching_order == 1 ? std::vector<unsigned int>{0, 1} : std::vector<unsigned int>{1, 0};
+    WipingExtrusions &wiping = tools.wiping_extrusions();
+    for (const PrintObject *candidate_object : print.objects())
+        for (const auto &candidate : candidate_object->get_layer_at_printz(tools.print_z, EPSILON)->purge_inner_walls())
+            wiping.is_overriddable_and_mark(*candidate.wall.collection, print.config(), *candidate_object, candidate.region->region());
+    FilamentChangeStats stats;
+    if (matching_order == 1)
+        REQUIRE_THAT(wiping.mark_wiping_extrusions(print, 2, 0, 1.f, stats), Catch::Matchers::WithinAbs(0., 1e-5));
+    REQUIRE_THAT(wiping.mark_wiping_extrusions(print, 0, 1, 1.f, stats), Catch::Matchers::WithinAbs(0., 1e-5));
+    if (matching_order == 2)
+        REQUIRE_THAT(wiping.mark_wiping_extrusions(print, 1, 0, 1.f, stats), Catch::Matchers::WithinAbs(0., 1e-5));
+
+    size_t foreign_walls = 0;
+    for (const auto &candidate : layer->purge_inner_walls()) {
+        const auto &wall = candidate.wall;
+        CHECK(wiping.get_extruder_override(wall.collection, object, 1) < 0);
+        CHECK(wiping.get_native_extruder_override(wall.collection, object, 1) < 0);
+        if (wiping.get_extruder_override(wall.collection, object, 0) != 1)
+            continue;
+        ++foreign_walls;
+        REQUIRE_FALSE(wall.is_shell());
+        for (const auto *shell : wall.shells) {
+            if (matching_order != 0) {
+                CHECK(wiping.get_extruder_override(shell, object, 0) == 0);
+                CHECK(wiping.get_native_extruder_override(shell, object, 0) < 0);
+            } else {
+                CHECK_FALSE(wiping.is_entity_overridden(shell, object, 0));
+                CHECK(wiping.get_native_extruder_override(shell, object, 0) == 0);
+            }
+            // Tool zero's negative normal-pass encoding is -1, also the old
+            // "unclaimed" sentinel. Repeated export queries must not turn it
+            // back into the configured (different) inner-wall filament.
+            for (int query = 0; query < 2; ++query) {
+                const auto *routing = wiping.get_extruder_overrides(shell, object, 1, 2);
+                REQUIRE(routing != nullptr);
+                REQUIRE(routing->size() == 2);
+                CHECK((*routing)[0] == (matching_order != 0 ? 0 : -1));
+                CHECK((*routing)[1] == -2);
+            }
+        }
+    }
+    REQUIRE(foreign_walls > 0);
+}
+
+TEST_CASE("Native shells can displace an entire layer's foreign purge capacity", "[PurgeIntoInnerWalls][Regression]")
+{
+    const char *generator = GENERATE("classic", "arachne");
+    Model model;
+    Print print;
+    DynamicPrintConfig config = purge_config(generator, 2, false, 3);
+    // Generate exactly the two configured walls, then exercise allocation on
+    // that fixed geometry (as when there is no space for another inner loop).
+    config.set_deserialize_strict({{"prime_volume", 0.}});
+    init_purge_print(print, model, config);
+    print.process();
+    LayerTools tools(print.objects().front()->layers().at(1)->print_z);
+    tools.extruders = {2}; // neither model's exterior matches this purge
+    WipingExtrusions &wiping = tools.wiping_extrusions();
+    double original_capacity = 0.;
+    for (const PrintObject *object : print.objects())
+        for (const auto &candidate : object->get_layer_at_printz(tools.print_z, EPSILON)->purge_inner_walls()) {
+            REQUIRE(candidate.wall.is_shell());
+            original_capacity += candidate.wall.collection->total_volume();
+            wiping.is_overriddable_and_mark(*candidate.wall.collection, print.config(), *object, candidate.region->region());
+        }
+    REQUIRE(original_capacity > 0.);
+    CHECK_THAT(wiping.purge_capacity(print, 0), Catch::Matchers::WithinAbs(0., 1e-5));
+    FilamentChangeStats stats;
+    CHECK_THAT(wiping.mark_wiping_extrusions(print, 0, 2, 2.f, stats), Catch::Matchers::WithinAbs(2., 1e-5));
+    CHECK_THAT(stats.purge_inner_walls_reduced_volume_mm3, Catch::Matchers::WithinAbs(2., 1e-5));
+    CHECK(stats.purge_inner_walls_affected_layer_count == 1);
+    CHECK_FALSE(wiping.is_anything_overridden()); // no phantom purge or empty destination
+}
+
+TEST_CASE("Native shell wall growth also propagates support counts downward", "[PurgeIntoInnerWalls][Regression]")
+{
+    const char *generator = GENERATE("classic", "arachne");
+    Model model;
+    Print print;
+    DynamicPrintConfig config = purge_config(generator, 1);
+    config.set_deserialize_strict({{"prime_volume", 20.}});
+    Test::init_print({make_cube(20., 20., 2.)}, print, model, config);
+    // Introduce the second color only high up: the native shell and purge
+    // loops needed there must also grow supporting walls on earlier layers.
+    DynamicPrintConfig range;
+    range.set_deserialize_strict({{"layer_height", 0.2}, {"sparse_infill_filament_id", 2}, {"top_surface_filament_id", 2}});
+    model.objects.front()->layer_config_ranges[{1., 2.}].assign_config(std::move(range));
+    print.apply(model, config);
+    print.process();
+    const PrintObject *object = print.objects().front();
+    int previous_extra = 0, max_extra = 0;
+    bool supported_below_purge = false;
+    for (size_t i = 0; i < object->layers().size(); ++i) {
+        const Layer *layer = object->layers()[i];
+        const int extra = layer->regions().front()->purge_inner_wall_plan.extra_loops;
+        if (i > 0)
+            CHECK(previous_extra >= extra - 1);
+        previous_extra = extra;
+        max_extra = std::max(max_extra, extra);
+        if (layer->print_z < 1. - EPSILON && extra > 0)
+            supported_below_purge = true;
+        if (extra > 0) {
+            int deepest_wall = 0;
+            for (const auto &candidate : layer->purge_inner_walls())
+                deepest_wall = std::max(deepest_wall, candidate.wall.collection->get_max_inset_idx());
+            // The 20 mm square has ample room: these must be real supporting
+            // toolpaths, not only larger numbers in the planning metadata.
+            CHECK(deepest_wall >= extra);
+        }
+    }
+    REQUIRE(max_extra >= 3);
+    REQUIRE(supported_below_purge);
+    size_t foreign_walls = 0;
+    for (const LayerTools &tools : print.tool_ordering())
+        for (const auto &candidate : object->get_layer_at_printz(tools.print_z, EPSILON)->purge_inner_walls()) {
+            if (tools.wiping_extrusions().get_extruder_override(candidate.wall.collection, object, 0) != 1)
+                continue;
+            ++foreign_walls;
+            REQUIRE_FALSE(candidate.wall.is_shell());
+            REQUIRE_FALSE(candidate.wall.shells.empty());
+            for (const auto *shell : candidate.wall.shells)
+                CHECK(shell->get_max_inset_idx() < candidate.wall.collection->get_max_inset_idx());
+        }
+    REQUIRE(foreign_walls > 0);
+}
+
+TEST_CASE("Export prints native shells in the outer filament without purge speeds", "[PurgeIntoInnerWalls][Regression]")
+{
+    const char *generator = GENERATE("classic", "arachne");
+    const bool infill_first = GENERATE(false, true);
+    Model model;
+    Print print;
+    DynamicPrintConfig config = purge_config(generator, 2);
+    config.set_deserialize_strict({
+        {"inner_wall_filament_id", 2}, {"is_infill_first", infill_first},
+        {"toolchange_ordering", "cyclic"}, {"toolchange_cyclic_order", "1,2"}, {"toolchange_cyclic_first_layer", true},
+        {"inner_wall_line_width", 0.45}, {"outer_wall_line_width", 0.45},
+        {"inner_wall_speed", 150.}, {"wipe_tower_max_purge_speed", 20.},
+        {"filament_max_volumetric_speed", "50,50"}, {"slow_down_for_layer_cooling", false},
+        {"slow_down_layers", 0}, {"small_perimeter_threshold", 0.}, {"enable_overhang_speed", false},
+        {"enable_arc_fitting", false}, {"seam_slope_type", "none"}, {"elefant_foot_compensation", 0.},
+    });
+    init_purge_print(print, model, config, true, 2);
+    print.process();
+    struct Shell {
+        BoundingBoxf3 box;
+        double print_z, inset;
+        int filament;
+        size_t moves = 0;
+    };
+    std::vector<Shell> shells;
+    for (const LayerTools &tools : print.tool_ordering())
+        for (const PrintObject *object : print.objects())
+            for (const auto &candidate : object->get_layer_at_printz(tools.print_z, EPSILON)->purge_inner_walls()) {
+                if (!candidate.wall.is_shell())
+                    continue;
+                for (size_t copy = 0; copy < object->instances().size(); ++copy) {
+                    const int native = tools.wiping_extrusions().get_native_extruder_override(candidate.wall.collection, object, copy);
+                    if (native < 0)
+                        continue;
+                    CHECK_FALSE(tools.wiping_extrusions().is_entity_overridden(candidate.wall.collection, object, copy));
+                    const auto *loop = dynamic_cast<const ExtrusionLoop *>(candidate.wall.collection->entities.front());
+                    REQUIRE(loop != nullptr);
+                    const BoundingBoxf3 box = object->instances()[copy].get_bounding_box();
+                    const double inset = 0.5 * (box.size().x() - unscale_(get_extents(loop->polygon()).size().x()));
+                    shells.push_back({box, tools.print_z, inset, native});
+                }
+            }
+    REQUIRE_FALSE(shells.empty());
+    GCodeProcessorResult result;
+    Test::gcode(print, &result);
+    size_t normal_speed_moves = 0;
+    for (const auto &move : result.moves) {
+        if (move.type != EMoveType::Extrude || move.extrusion_role != erPerimeter)
+            continue;
+        for (Shell &shell : shells) {
+            if (std::abs(move.position.z() - shell.print_z) > 1e-4)
+                continue;
+            const double edge_distance = std::min({move.position.x() - shell.box.min.x(), shell.box.max.x() - move.position.x(),
+                                                   move.position.y() - shell.box.min.y(), shell.box.max.y() - move.position.y()});
+            if (std::abs(edge_distance - shell.inset) > 0.05)
+                continue;
+            ++shell.moves;
+            CHECK(int(move.extruder_id) == shell.filament);
+            if (move.feedrate > 20. + 1e-3)
+                ++normal_speed_moves;
+        }
+    }
+    for (const Shell &shell : shells)
+        CHECK(shell.moves > 0);
+    REQUIRE(normal_speed_moves > 0);
 }

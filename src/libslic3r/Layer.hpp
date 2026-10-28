@@ -97,6 +97,8 @@ public:
         int extra_loops = 0;
         float existing_inner_wall_volume_mm3 = 0.f;
         float target_volume_mm3 = 0.f;
+        // Foreign-purge capacity after reserving the native inner shell.
+        // Matching purge may additionally use the reserved shell itself.
         float planned_volume_mm3 = 0.f;
         bool capacity_limited = false;
     };
@@ -230,6 +232,14 @@ public:
 
     // Whether two regions can be printed in a continues perimeter
     static bool             is_perimeter_compatible(const Print& print, const PrintRegion& a, const PrintRegion& b);
+    // A perimeter loop may be owned by a different compatible region from
+    // its neighboring loops after make_perimeters() merges/splits regions.
+    // Group native shells across those regions, but never across outer colors.
+    struct PurgeInnerWall {
+        const LayerRegion *region;
+        ExtrusionEntityCollection::PurgeInnerWall wall;
+    };
+    std::vector<PurgeInnerWall> purge_inner_walls() const;
     void                    make_perimeters();
     // Phony version of make_fills() without parameters for Perl integration only.
     void                    make_fills() { this->make_fills(nullptr); }

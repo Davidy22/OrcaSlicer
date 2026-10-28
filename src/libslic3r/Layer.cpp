@@ -4,6 +4,7 @@
 #include "Point.hpp"
 #include "ExPolygon.hpp"
 #include "ExtrusionEntity.hpp"
+#include "ExtrusionEntityCollection.hpp"
 #include "Exception.hpp"
 #include "Flow.hpp"
 #include "Print.hpp"
@@ -197,6 +198,25 @@ bool Layer::is_perimeter_compatible(const Print& print, const PrintRegion& a, co
         && config.seam_slope_min_length   == other_config.seam_slope_min_length
         && config.seam_slope_steps        == other_config.seam_slope_steps
         && config.seam_slope_inner_walls  == other_config.seam_slope_inner_walls;
+}
+
+std::vector<Layer::PurgeInnerWall> Layer::purge_inner_walls() const
+{
+    std::map<int, std::vector<const ExtrusionEntityCollection *>> by_outer_filament;
+    std::map<const ExtrusionEntityCollection *, const LayerRegion *> owners;
+    for (const LayerRegion *region : m_regions)
+        for (const ExtrusionEntity *entity : region->perimeters.entities)
+            if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(entity)) {
+                by_outer_filament[region->region().config().outer_wall_filament_id.value].push_back(collection);
+                owners.emplace(collection, region);
+            }
+    std::vector<PurgeInnerWall> result;
+    for (const auto &[filament, collections] : by_outer_filament)
+        for (auto &wall : ExtrusionEntityCollection::purge_inner_walls(collections)) {
+            const LayerRegion *region = owners.at(wall.collection);
+            result.push_back({region, std::move(wall)});
+        }
+    return result;
 }
 
 // Here the perimeters are created cummulatively for all layer regions sharing the same parameters influencing the perimeters.

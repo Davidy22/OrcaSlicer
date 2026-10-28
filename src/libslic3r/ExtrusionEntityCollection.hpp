@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <iterator>
 #include <cstddef>
+#include <vector>
 
 namespace Slic3r {
 
@@ -156,6 +157,16 @@ public:
     // Split perimeter islands into individually overridable wall collections,
     // preserving the wall entities, their metadata and their emission order.
     void split_purge_inner_walls();
+    // For each separated inner wall, identify the closest inner loop(s) at
+    // its visible contour/hole boundary. Those loops may carry matching purge,
+    // but must remain in the exterior filament when deeper walls carry foreign purge.
+    struct PurgeInnerWall {
+        const ExtrusionEntityCollection *collection;
+        std::vector<const ExtrusionEntityCollection *> shells;
+        bool is_shell() const { return shells.size() == 1 && shells.front() == collection; }
+    };
+    std::vector<PurgeInnerWall> purge_inner_walls() const;
+    static std::vector<PurgeInnerWall> purge_inner_walls(const std::vector<const ExtrusionEntityCollection *> &collections);
     bool is_existing_purge_wall() const;
     int get_max_inset_idx() const;
 

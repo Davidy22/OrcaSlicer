@@ -1,4 +1,5 @@
 #include "ExPolygon.hpp"
+#include "ExtrusionEntityCollection.hpp"
 #include "Config.hpp"
 #include "Exception.hpp"
 #include "Line.hpp"
@@ -660,6 +661,7 @@ void PrintObject::make_perimeters()
             // existing walls and then to proportional reduction (with a
             // warning), so an over-estimate only costs extra walls.
             std::vector<float> demand(m_layers.size(), 0.f);
+            std::vector<std::map<unsigned int, float>> demand_by_filament(m_layers.size());
             {
                 std::vector<const PrintObject *> objects;
                 for (const PrintObject *object : m_print->objects())
@@ -679,23 +681,46 @@ void PrintObject::make_perimeters()
                         if (object->config().purge_into_inner_walls_preferred.getBool() || !any_preferred)
                             ++preferred_count;
                         for (const unsigned int filament : layer_filaments(layer)) {
-                            if (prev_filament >= 0 && (int) filament != prev_filament)
-                                layer_demand += estimate_flush_volume(purge_cfg, (unsigned int) prev_filament, filament);
+                            if (prev_filament >= 0 && (int) filament != prev_filament) {
+                                const float volume = estimate_flush_volume(purge_cfg, (unsigned int) prev_filament, filament);
+                                layer_demand += volume;
+                                demand_by_filament[layer_idx][filament] += volume;
+                            }
                             prev_filament = (int) filament;
                         }
                     }
-                    if (preferred_count > 0)
+                    if (preferred_count > 0) {
                         demand[layer_idx] = layer_demand / float(preferred_count);
+                        for (auto &[filament, volume] : demand_by_filament[layer_idx])
+                            volume /= float(preferred_count);
+                    }
                 }
             }
 
             std::vector<int>   extra_loops(m_layers.size(), 0), applied_loops(m_layers.size(), 0);
             std::vector<float> measured(m_layers.size(), 0.f);
-            auto measure_layer = [this, num_copies](size_t layer_idx) {
+            auto measure_layer = [this, num_copies, &demand_by_filament](size_t layer_idx) {
                 float volume = 0.f;
-                for (const LayerRegion *layerm : m_layers[layer_idx]->regions())
-                    volume += layerm->purge_candidate_volume();
-                return volume * num_copies;
+                std::map<unsigned int, float> shell_volume;
+                for (const auto &candidate : m_layers[layer_idx]->purge_inner_walls()) {
+                    const float capacity = float(candidate.wall.collection->total_volume()) * num_copies;
+                    if (candidate.wall.is_shell()) {
+                        const unsigned int outer_filament = unsigned(candidate.region->region().config().outer_wall_filament_id.value - 1);
+                        shell_volume[outer_filament] += capacity;
+                    } else
+                        volume += capacity;
+                }
+                // Keep one native-color inner wall behind each visible boundary.
+                // Matching purge already supplies that wall; only the matching
+                // budget may credit its volume. Otherwise grow a replacement
+                // deeper inside, before infill, and include it in extra_loops so
+                // the ordinary downward support propagation also carries it.
+                for (const auto &[filament, capacity] : shell_volume) {
+                    const auto it = demand_by_filament[layer_idx].find(filament);
+                    if (it != demand_by_filament[layer_idx].end())
+                        volume += std::min(capacity, it->second);
+                }
+                return volume;
             };
             for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx) {
                 measured[layer_idx] = measure_layer(layer_idx);
@@ -705,10 +730,11 @@ void PrintObject::make_perimeters()
 
             // Grow loops, propagate the wall counts downward, regenerate and
             // re-measure. The offset projection is an estimate, so allow a
-            // few correction cycles. There is deliberately no configurable
-            // loop cap: growth stops when the purge volume fits or the layer
-            // is solid.
-            for (int cycle = 0; cycle < 3; ++cycle) {
+            // few correction cycles, including one for a newly created native
+            // shell consuming the first projected loop. There is deliberately
+            // no configurable loop cap: growth stops when the purge volume
+            // fits or the layer is solid.
+            for (int cycle = 0; cycle < 4; ++cycle) {
                 bool changed = false;
                 for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx) {
                     if (demand[layer_idx] <= 0.f || measured[layer_idx] >= demand[layer_idx])
@@ -773,11 +799,15 @@ void PrintObject::make_perimeters()
 
             for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx) {
                 const bool capacity_limited = measured[layer_idx] < demand[layer_idx];
+                std::map<const LayerRegion *, float> foreign_capacity;
+                for (const auto &candidate : m_layers[layer_idx]->purge_inner_walls())
+                    if (!candidate.wall.is_shell())
+                        foreign_capacity[candidate.region] += float(candidate.wall.collection->total_volume());
                 for (LayerRegion *layerm : m_layers[layer_idx]->regions()) {
                     auto &plan                = layerm->purge_inner_wall_plan;
                     plan.extra_loops          = extra_loops[layer_idx];
                     plan.target_volume_mm3    = demand[layer_idx]; // assigned share, whole layer (all copies)
-                    plan.planned_volume_mm3   = layerm->purge_candidate_volume();
+                    plan.planned_volume_mm3   = foreign_capacity[layerm];
                     plan.capacity_limited     = capacity_limited;
                 }
             }
