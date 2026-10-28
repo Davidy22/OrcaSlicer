@@ -239,6 +239,107 @@ TEST_CASE("Reduced inner-wall purge stays visible without a print-time dialog", 
     CHECK(warning.level == PrintStateBase::WarningLevel::NOTIFICATION_ONLY);
 }
 
+TEST_CASE("Purge allocation ranks preferred objects then loop volumes across objects", "[PurgeIntoInnerWalls][Regression]")
+{
+    const char *generator = GENERATE("classic", "arachne");
+    const bool first_preferred = GENERATE(false, true);
+    const bool second_preferred = GENERATE(false, true);
+    CAPTURE(generator, first_preferred, second_preferred);
+
+    // One object has a large and a small island; the other has a medium island.
+    // Global loop ranking must interleave objects, not just sort whole objects
+    // by their largest loop. Give the medium island two copies to check ties.
+    TriangleMesh first = make_cube(30., 30., 1.);
+    TriangleMesh small = make_cube(10., 10., 1.);
+    small.translate(45.f, 0.f, 0.f);
+    first.merge(small);
+    first.translate(40.f, 40.f, 0.f);
+    TriangleMesh second = make_cube(20., 20., 1.);
+    second.translate(120.f, 40.f, 0.f);
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
+        {{"extruder", 1}, {"purge_into_inner_walls_preferred", first_preferred}},
+        {{"extruder", 2}, {"purge_into_inner_walls_preferred", second_preferred}},
+    };
+    DynamicPrintConfig config = purge_config(generator, 3, false, 4);
+    config.set_deserialize_strict({{"prime_volume", 1.}, {"enable_support", false}});
+    Model model;
+    Print print;
+    Test::init_print(std::vector<TriangleMesh>{first, second}, print, model, config, &overrides, false);
+    ModelInstance *copy = model.objects[1]->add_instance(*model.objects[1]->instances.front());
+    copy->set_offset(copy->get_offset() + Vec3d(0., 60., 0.));
+    print.apply(model, config);
+    print.process();
+    REQUIRE(print.objects().size() == 2);
+    const PrintObject *a = print.objects()[0];
+    const PrintObject *b = print.objects()[1];
+    REQUIRE(a->instances().size() == 1);
+    REQUIRE(b->instances().size() == 2);
+    REQUIRE(a->layers().size() > 1);
+
+    LayerTools tools(a->layers()[1]->print_z);
+    // Both incoming colors are foreign to both models, so native shells must
+    // remain protected while the four available inner-wall copies are claimed.
+    tools.extruders = {2, 3, 2, 3};
+    WipingExtrusions &wiping = tools.wiping_extrusions();
+    std::vector<std::vector<const ExtrusionEntityCollection *>> walls(2);
+    for (size_t i = 0; i < print.objects().size(); ++i) {
+        const PrintObject *object = print.objects()[i];
+        const Layer *layer = object->get_layer_at_printz(tools.print_z, EPSILON);
+        REQUIRE(layer != nullptr);
+        for (const auto &candidate : layer->purge_inner_walls()) {
+            const auto *wall = candidate.wall.collection;
+            if (wiping.is_overriddable_and_mark(*wall, print.config(), *object, candidate.region->region()) &&
+                !candidate.wall.is_shell())
+                walls[i].push_back(wall);
+        }
+    }
+    REQUIRE(walls[0].size() == 2);
+    REQUIRE(walls[1].size() == 1);
+    if (walls[0][0]->total_volume() < walls[0][1]->total_volume())
+        std::swap(walls[0][0], walls[0][1]);
+    REQUIRE(walls[0][0]->total_volume() > walls[1][0]->total_volume());
+    REQUIRE(walls[1][0]->total_volume() > walls[0][1]->total_volume());
+    REQUIRE(walls[0][1]->total_volume() > 1.); // each transition claims exactly one loop
+
+    struct Claim {
+        const ExtrusionEntityCollection *wall;
+        const PrintObject *object;
+        size_t copy;
+    };
+    const Claim large{walls[0][0], a, 0}, small_wall{walls[0][1], a, 0};
+    const Claim medium_first{walls[1][0], b, 0}, medium_second{walls[1][0], b, 1};
+    std::vector<Claim> expected{large, medium_first, medium_second, small_wall};
+    if (first_preferred != second_preferred)
+        expected = first_preferred ? std::vector<Claim>{large, small_wall, medium_first, medium_second} :
+                                     std::vector<Claim>{medium_first, medium_second, large, small_wall};
+
+    FilamentChangeStats stats;
+    unsigned int previous = 0;
+    for (size_t change = 0; change < tools.extruders.size(); ++change) {
+        const unsigned int filament = tools.extruders[change];
+        CHECK_THAT(wiping.mark_wiping_extrusions(print, previous, filament, 1.f, stats),
+                   Catch::Matchers::WithinAbs(0., 1e-5));
+        previous = filament;
+        for (size_t i = 0; i < expected.size(); ++i) {
+            const Claim &claim = expected[i];
+            const int actual = wiping.get_extruder_override(claim.wall, claim.object, claim.copy);
+            if (i <= change)
+                CHECK(actual == int(tools.extruders[i]));
+            else
+                CHECK(actual < 0);
+        }
+    }
+    // Reserved native-color walls still surround every selected purge loop.
+    for (const PrintObject *object : print.objects())
+        for (const auto &candidate : object->get_layer_at_printz(tools.print_z, EPSILON)->purge_inner_walls())
+            if (candidate.wall.is_shell())
+                for (size_t instance = 0; instance < object->instances().size(); ++instance) {
+                    CHECK(wiping.get_extruder_override(candidate.wall.collection, object, instance) < 0);
+                    CHECK(wiping.get_native_extruder_override(candidate.wall.collection, object, instance) ==
+                          int(tools.wall_extruder_id(candidate.region->region())));
+                }
+}
+
 TEST_CASE("Matching purge filament occupies the walls nearest the exterior", "[PurgeIntoInnerWalls][Regression]")
 {
     const char *generator = GENERATE("classic", "arachne");

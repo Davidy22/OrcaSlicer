@@ -279,17 +279,22 @@ TEST_CASE("Purge flush volume estimate", "[PurgeIntoInnerWalls]")
     REQUIRE(estimate_flush_volume(config, 1, 1) == Catch::Approx(0.));
 }
 
-TEST_CASE("Purge wall priority follows exterior filament and inset depth", "[PurgeIntoInnerWalls][Regression]")
+TEST_CASE("Purge wall priority favors preferred objects then the largest loop volumes", "[PurgeIntoInnerWalls][Regression]")
 {
     using PurgeIntoInnerWalls::wall_priority;
-    // Matching filament takes the closest safe wall, even when a larger or
-    // pre-existing wall is deeper inside. Foreign filament does the reverse.
-    CHECK(wall_priority(true, 1, false, 1.f) > wall_priority(true, 3, true, 20.f));
-    CHECK(wall_priority(false, 5, false, 1.f) > wall_priority(false, 2, true, 20.f));
-    CHECK(wall_priority(true, 4, true, 1.f) > wall_priority(false, 8, true, 20.f));
-    // Existing capacity and volume only break ties at the same color/depth.
-    CHECK(wall_priority(false, 2, true, 1.f) > wall_priority(false, 2, false, 20.f));
-    CHECK(wall_priority(true, 2, true, 20.f) > wall_priority(true, 2, true, 1.f));
+    // The per-object checkbox wins even over a much larger native-color wall.
+    CHECK(wall_priority(true, false, 5, false, 1.f) > wall_priority(false, true, 1, true, 100.f));
+    // Within either preference tier, volume outranks color, depth and whether
+    // the wall was generated for purge or already existed.
+    CHECK(wall_priority(false, false, 3, false, 20.f) > wall_priority(false, true, 1, true, 1.f));
+    CHECK(wall_priority(true, true, 4, false, 20.f) > wall_priority(true, true, 1, true, 1.f));
+    CHECK(wall_priority(true, false, 2, false, 20.f) > wall_priority(true, false, 5, true, 1.f));
+    CHECK(wall_priority(false, false, 2, false, 20.f) > wall_priority(false, false, 2, true, 1.f));
+    // Equal volumes retain the existing color/depth/capacity tie-breakers.
+    CHECK(wall_priority(false, true, 4, true, 20.f) > wall_priority(false, false, 8, true, 20.f));
+    CHECK(wall_priority(false, true, 1, false, 20.f) > wall_priority(false, true, 3, true, 20.f));
+    CHECK(wall_priority(false, false, 5, false, 20.f) > wall_priority(false, false, 2, true, 20.f));
+    CHECK(wall_priority(false, false, 2, true, 20.f) > wall_priority(false, false, 2, false, 20.f));
 }
 
 TEST_CASE("Purge wall speed ramps without exceeding existing speed or flow limits", "[PurgeIntoInnerWalls][Regression]")

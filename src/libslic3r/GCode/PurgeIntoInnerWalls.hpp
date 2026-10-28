@@ -7,12 +7,12 @@
 
 namespace Slic3r::PurgeIntoInnerWalls {
 
-// Larger keys are allocated first. Keep matching filament near the exterior;
-// take foreign filament from the deepest walls, including demand-grown walls,
-// so a later matching toolchange can still use the walls nearest the surface.
-inline auto wall_priority(bool matches_outer_wall, int inset_idx, bool existing, float volume)
+// Larger keys are allocated first: preferred objects, then the largest loop
+// volumes. Color, depth and existing capacity only break equal-volume ties;
+// native exterior/shield protection is enforced before this ranking.
+inline auto wall_priority(bool preferred, bool matches_outer_wall, int inset_idx, bool existing, float volume)
 {
-    return std::make_tuple(matches_outer_wall, matches_outer_wall ? -inset_idx : inset_idx, existing, volume);
+    return std::make_tuple(preferred, volume, matches_outer_wall, matches_outer_wall ? -inset_idx : inset_idx, existing);
 }
 
 // WipeTower2's purge ramp, in mm/s rather than its writer's mm/min. Advance once

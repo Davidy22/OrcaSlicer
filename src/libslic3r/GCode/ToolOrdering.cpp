@@ -3534,8 +3534,8 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         const float requested_volume = std::max(0.f, volume_to_wipe);
         float purge_consumed = 0.f;
 
-        // Process objects prioritized for purge (purge_into_inner_walls_preferred) first;
-        // any remaining purge volume then flows into unmarked objects' inner walls.
+        // Deterministic object order for equal-priority loops and support fallback.
+        // Wall allocation below compares loop volumes across all objects.
         ConstPrintObjectPtrs purge_object_list = print.objects().vector();
         std::sort(purge_object_list.begin(), purge_object_list.end(), [](const PrintObject* a, const PrintObject* b) {
             bool a_preferred = a->config().purge_into_inner_walls_preferred.getBool();
@@ -3567,29 +3567,28 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         }
         float remaining = requested_volume * m_purge_layer_scale;
 
-        // Consume the (possibly reduced) purge budget from objects in
-        // priority order (all objects are eligible; consumption stops once
-        // the budget is exhausted)
+        // The object preference comes first, then the largest eligible wall
+        // loops across the layer. Do not exhaust a smaller object's walls just
+        // because its ID sorts before an object with larger loops.
+        struct PurgeCandidate {
+            const ExtrusionEntityCollection* collection;
+            const PrintObject* object;
+            const LayerRegion* region;
+            std::vector<const ExtrusionEntityCollection *> shells;
+            unsigned int copy;
+            int inset_idx;
+            bool matches_outer_wall;
+            bool is_existing;
+            float volume;
+        };
+        std::vector<PurgeCandidate> candidates;
+
         for (const PrintObject* object : purge_object_list) {
             const Layer* this_layer = object->get_layer_at_printz(lt.print_z, EPSILON);
             if (this_layer == nullptr)
                 continue;
 
             size_t num_of_copies = object->instances().size();
-
-            // Collect all purge inner wall candidates from this layer
-            struct PurgeCandidate {
-                const ExtrusionEntityCollection* collection;
-                const PrintObject* object;
-                const LayerRegion* region;
-                std::vector<const ExtrusionEntityCollection *> shells;
-                unsigned int copy;
-                int inset_idx;
-                bool matches_outer_wall;
-                bool is_existing;
-                float volume;
-            };
-            std::vector<PurgeCandidate> candidates;
 
             // Group once per object/layer, not once per copy. Shells may live
             // in another compatible region after merged perimeter generation.
@@ -3609,43 +3608,46 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                     candidates.push_back({coll, object, layerm, wall.shells, copy, coll->get_max_inset_idx(), matches_outer_wall,
                                           coll->is_existing_purge_wall(), static_cast<float>(coll->total_volume())});
             }
+        }
 
-            // Preserve copy order for equal spatial priorities. This also
-            // keeps a small matching purge and a later foreign purge on the
-            // same copy instead of unnecessarily shielding a different copy.
-            std::stable_sort(candidates.begin(), candidates.end(), [](const PurgeCandidate& a, const PurgeCandidate& b) {
-                return PurgeIntoInnerWalls::wall_priority(a.matches_outer_wall, a.inset_idx, a.is_existing, a.volume) >
-                       PurgeIntoInnerWalls::wall_priority(b.matches_outer_wall, b.inset_idx, b.is_existing, b.volume);
-            });
+        // Rank loops across all objects, not one whole object at a time.
+        // Equal keys keep deterministic object/copy order and shell reuse.
+        std::stable_sort(candidates.begin(), candidates.end(), [](const PurgeCandidate& a, const PurgeCandidate& b) {
+            return PurgeIntoInnerWalls::wall_priority(a.object->config().purge_into_inner_walls_preferred.getBool(),
+                                                      a.matches_outer_wall, a.inset_idx, a.is_existing, a.volume) >
+                   PurgeIntoInnerWalls::wall_priority(b.object->config().purge_into_inner_walls_preferred.getBool(),
+                                                      b.matches_outer_wall, b.inset_idx, b.is_existing, b.volume);
+        });
 
-            for (const auto& cand : candidates) {
-                if (remaining <= 0.f)
-                    break;
-                if (is_entity_overridden(cand.collection, cand.object, cand.copy))
-                    continue;
+        for (const auto& cand : candidates) {
+            if (remaining <= 0.f)
+                break;
+            if (is_entity_overridden(cand.collection, cand.object, cand.copy))
+                continue;
 
-                // Only copies/boundaries that actually receive purge need
-                // native routing. Matching purge on the shell already supplies
-                // that wall; otherwise its unclaimed neighbors must stay native,
-                // even when their region selects a different inner filament.
-                const unsigned int outer = lt.wall_extruder_id(cand.region->region());
-                for (const auto *shell : cand.shells)
-                    if (shell != cand.collection && !is_entity_overridden(shell, object, cand.copy))
-                        set_native_extruder_override(shell, object, cand.copy, int(outer), num_of_copies);
-                // A later matching change may claim a shell previously
-                // reserved for normal printing. It now supplies the shell as
-                // purge: drop only this copy's ordinary reservation.
-                auto native = native_entity_map.find(std::make_tuple(cand.collection, cand.object));
-                if (native != native_entity_map.end()) {
-                    native->second[cand.copy] = -1;
-                    if (std::all_of(native->second.begin(), native->second.end(), [](int extruder) { return extruder < 0; }))
-                        native_entity_map.erase(native);
-                }
-                set_extruder_override(cand.collection, cand.object, cand.copy, new_extruder, num_of_copies);
-                float consumed = cand.volume;
-                remaining -= consumed;
-                purge_consumed += consumed;
+            const size_t num_of_copies = cand.object->instances().size();
+
+            // Only copies/boundaries that actually receive purge need
+            // native routing. Matching purge on the shell already supplies
+            // that wall; otherwise its unclaimed neighbors must stay native,
+            // even when their region selects a different inner filament.
+            const unsigned int outer = lt.wall_extruder_id(cand.region->region());
+            for (const auto *shell : cand.shells)
+                if (shell != cand.collection && !is_entity_overridden(shell, cand.object, cand.copy))
+                    set_native_extruder_override(shell, cand.object, cand.copy, int(outer), num_of_copies);
+            // A later matching change may claim a shell previously
+            // reserved for normal printing. It now supplies the shell as
+            // purge: drop only this copy's ordinary reservation.
+            auto native = native_entity_map.find(std::make_tuple(cand.collection, cand.object));
+            if (native != native_entity_map.end()) {
+                native->second[cand.copy] = -1;
+                if (std::all_of(native->second.begin(), native->second.end(), [](int extruder) { return extruder < 0; }))
+                    native_entity_map.erase(native);
             }
+            set_extruder_override(cand.collection, cand.object, cand.copy, new_extruder, num_of_copies);
+            float consumed = cand.volume;
+            remaining -= consumed;
+            purge_consumed += consumed;
         }
 
         // Model inner walls are always exhausted before support paths, even
