@@ -5602,7 +5602,7 @@ void Print::_plan_purge_into_inner_walls()
     if (total_leftover > 1.f) {
         const auto &stats = m_tool_ordering.m_stats_by_single_extruder;
         this->active_step_add_warning(
-            PrintStateBase::WarningLevel::CRITICAL,
+            PrintStateBase::WarningLevel::NOTIFICATION_ONLY,
             Slic3r::format(_u8L("Purge into inner walls could not absorb the full purge volume: %1% mm³ in total could not "
                                 "be purged into model inner walls or supports even after growing extra wall loops (worst layer: %2% mm³ at height %3%; "
                                 "affected toolchanges: %4%; affected layers: %5%). The purge volume was reduced proportionally on those "

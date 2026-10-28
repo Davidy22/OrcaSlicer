@@ -60,7 +60,9 @@ public:
 
     enum class WarningLevel {
         NON_CRITICAL,
-        CRITICAL
+        CRITICAL,
+        // Keep the slicing notification, but do not repeat it in the print/export dialog.
+        NOTIFICATION_ONLY
     };
 
     enum SlicingNotificationType

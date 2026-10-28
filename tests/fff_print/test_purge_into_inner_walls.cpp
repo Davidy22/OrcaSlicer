@@ -212,6 +212,33 @@ TEST_CASE("Enabling inner-wall purge does not emit a blanket validation warning"
     // after slicing; opting into the mode alone must not produce a warning.
 }
 
+TEST_CASE("Reduced inner-wall purge stays visible without a print-time dialog", "[PurgeIntoInnerWalls][Regression]")
+{
+    const char *generator = GENERATE("classic", "arachne");
+    const bool shortfall = GENERATE(false, true);
+    CAPTURE(generator, shortfall);
+
+    Model model;
+    Print print;
+    DynamicPrintConfig config = purge_config(generator, 3);
+    // The two 20 x 20 x 1 mm cubes cannot absorb 1000 mm³ on one layer,
+    // even when filled with walls. A 1 mm³ transition fits their inner walls.
+    config.set_deserialize_strict({{"prime_volume", shortfall ? 1000. : 1.}, {"enable_support", false}});
+    init_purge_print(print, model, config);
+    print.process();
+
+    const auto state = print.step_state_with_warnings(psWipeTower);
+    if (!shortfall) {
+        CHECK(state.warnings.empty());
+        return;
+    }
+    REQUIRE(state.warnings.size() == 1);
+    const PrintStateBase::Warning &warning = state.warnings.front();
+    CHECK(warning.current);
+    CHECK_FALSE(warning.message.empty());
+    CHECK(warning.level == PrintStateBase::WarningLevel::NOTIFICATION_ONLY);
+}
+
 TEST_CASE("Matching purge filament occupies the walls nearest the exterior", "[PurgeIntoInnerWalls][Regression]")
 {
     const char *generator = GENERATE("classic", "arachne");
