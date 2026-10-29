@@ -210,3 +210,25 @@ TEST_CASE("Support replanning transfers its saved native paths instead of copyin
         CHECK(clones == saved_clones);
     }
 }
+
+TEST_CASE("Extending grown support restores its original native paths", "[PurgeSupport][PurgeIntoInnerWalls][Regression]")
+{
+    const Flow flow(0.45f, 0.2f, 0.4f);
+    size_t clones = 0;
+    ExtrusionEntityCollection paths = sparse_support(flow, &clones);
+    const ExtrusionEntitiesPtr native_paths = paths.entities;
+    const double native_volume = paths.total_volume();
+    SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow, 0);
+    const double first = region.grow(1.);
+    REQUIRE(first > 0.);
+    const double remaining = region.grow(10000.);
+    REQUIRE(remaining > 0.);
+    CHECK(support_loop_count(paths) > 2);
+    CHECK_THAT(paths.total_volume(), WithinAbs(native_volume + first + remaining, 1e-6));
+    CHECK(clones == 0);
+    region.reset();
+    CHECK(paths.entities == native_paths);
+    CHECK_THAT(paths.total_volume(), WithinAbs(native_volume, 1e-6));
+    CHECK_THAT(region.grow(10000.), WithinAbs(first + remaining, 1e-6));
+    CHECK(clones == 0);
+}

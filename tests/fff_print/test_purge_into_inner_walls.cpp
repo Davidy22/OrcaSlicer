@@ -94,10 +94,14 @@ TEST_CASE("Both perimeter generators preserve native depths independently of pur
     CAPTURE(generator, enabled);
     Model model;
     Print print;
-    auto config = purge_config(generator, 4, false, 1);
+    auto config = purge_config(generator, 4, false, 3);
     config.set_deserialize_strict({{"purge_into_inner_walls", enabled}, {"prime_volume", 0.}});
     Test::init_print({make_cube(20., 20., 1.)}, print, model, config);
     print.process();
+    // Configured-but-unused slots must not turn this into a purge job.
+    REQUIRE(print.tool_ordering().all_extruders().size() == 1);
+    for (const LayerTools &tools : print.tool_ordering())
+        CHECK_FALSE(tools.wiping_extrusions().is_anything_overridden());
     std::set<int> depths;
     const int native_path_depth = ExtrusionPath(erPerimeter).inset_idx;
     for (const PrintObject *object : print.objects())
@@ -131,6 +135,7 @@ TEST_CASE("Purge overrides and emitted colors are restricted to inner walls", "[
     const DynamicPrintConfig config = purge_config(generator, walls, legacy_flush);
     init_purge_print(print, model, config, prefer_first);
     print.process();
+    REQUIRE(print.tool_ordering().all_extruders().size() == 2);
     REQUIRE(print.objects().size() == 2);
     CHECK(print.objects().front()->config().flush_into_objects.getBool() == legacy_flush);
 

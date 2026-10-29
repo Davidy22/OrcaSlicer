@@ -233,7 +233,7 @@ std::vector<float> LayerRegion::purge_extra_loop_cumulative_volumes(int already_
     for (const Surface& surface : this->slices.surfaces) {
         if (!(surface.surface_type == stInternal || surface.is_external()))
             continue;
-        ExPolygons current = offset_ex(ExPolygons{surface.expolygon}, -float((first_new_loop + 0.5) * double(spacing)));
+        ExPolygons current = offset_ex(surface.expolygon, -float((first_new_loop + 0.5) * double(spacing)));
         if (!current.empty())
             currents.emplace_back(std::move(current));
     }
@@ -244,8 +244,15 @@ std::vector<float> LayerRegion::purge_extra_loop_cumulative_volumes(int already_
     // surfaces turn solid far earlier.
     for (int loop = 0; loop < 10000; ++loop) {
         double loop_length = 0.;
-        for (const ExPolygons& current : currents)
-            loop_length += total_length(to_polygons(current));
+        for (const ExPolygons& current : currents) {
+            // Traverse existing contours without copying their point buffers.
+            // Keep the flattened order and per-surface sum unchanged.
+            double current_length = 0.;
+            for (const ExPolygon &expolygon : current)
+                for (size_t i = 0; i < expolygon.num_contours(); ++i)
+                    current_length += expolygon.contour_or_hole(i).length();
+            loop_length += current_length;
+        }
         if (loop_length <= 0.)
             break; // solid everywhere
         running += float(unscale_(loop_length) * mm3_per_mm);

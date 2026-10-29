@@ -5509,16 +5509,9 @@ void Print::_plan_purge_into_inner_walls()
     if (m_wipe_tower_data.tool_ordering.empty() || m_wipe_tower_data.tool_ordering.last_extruder() == unsigned(-1))
         throw Slic3r::SlicingError(_u8L("The print is empty. The model is not printable with current print settings."));
 
-    // Is there any filament change at all? Single-filament prints have nothing to purge.
-    {
-        bool         any_change = false;
-        unsigned int cur        = m_wipe_tower_data.tool_ordering.first_extruder();
-        for (const auto &lt : m_wipe_tower_data.tool_ordering.layer_tools())
-            for (const unsigned int e : lt.extruders)
-                if (e != cur) { any_change = true; cur = e; }
-        if (! any_change)
-            return;
-    }
+    // The ordering already caches the unique tools actually used, not all configured filaments.
+    if (m_wipe_tower_data.tool_ordering.all_extruders().size() < 2)
+        return;
 
     this->throw_if_canceled();
 

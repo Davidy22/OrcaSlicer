@@ -24,6 +24,7 @@
 #include <cassert>
 #include <map>
 #include <memory>
+#include <optional>
 #include "Config.hpp"
 #include "MultiMaterialSegmentation.hpp"
 #include "ObjectID.hpp"
@@ -472,6 +473,7 @@ double SupportLayer::PurgeRegion::grow(double additional_volume)
     const double spacing = m_flow.scaled_spacing();
     ExPolygons loop_areas = offset_ex(m_areas, -0.5 * spacing);
     ExtrusionEntityCollection walls;
+    std::optional<ExPolygons> expanded_areas;
     size_t wall_count = 0;
     while (!loop_areas.empty() && volume + EPSILON < target_volume) {
         ++wall_count;
@@ -482,7 +484,10 @@ double SupportLayer::PurgeRegion::grow(double additional_volume)
             // existing infill. Preserve native fill (including its individual
             // heights/flows) in the interior and outside this growth region.
             const ExPolygons interior = offset_ex(loop_areas, -0.5 * spacing);
-            const ExPolygons wall_band = diff_ex(offset_ex(m_areas, SCALED_EPSILON), interior);
+            // This boundary is invariant; defer it until an extra wall is possible.
+            if (!expanded_areas)
+                expanded_areas = offset_ex(m_areas, SCALED_EPSILON);
+            const ExPolygons wall_band = diff_ex(*expanded_areas, interior);
             ExtrusionEntityCollection candidate(walls);
             candidate.no_sort = true; // support outlines before remaining fill
             for_each_extrusion_path(m_original ? *m_original : *m_paths, [&](const ExtrusionPath &path) {
@@ -500,6 +505,8 @@ double SupportLayer::PurgeRegion::grow(double additional_volume)
                 m_paths->swap(candidate);
             }
         }
+        if (volume + EPSILON >= target_volume)
+            break; // No next ring is needed once the request is satisfied.
         // Same shrink/open operation as native tree support walls: narrow
         // remnants disappear instead of producing overlapping/overflowing loops.
         loop_areas = offset2_ex(loop_areas, -1.4 * spacing, 0.4 * spacing);
