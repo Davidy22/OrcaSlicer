@@ -8400,12 +8400,16 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
         if (m_purge_wall && is_perimeter(loop.role()) && !is_external_perimeter(loop.role())) {
             const Polygon polygon = loop.polygon();
             std::vector<bool> preferred_edges;
-            preferred_edges.reserve(polygon.points.size());
-            // Sample non-overhang spans directly, rather than projecting random
-            // overhang starts onto the same few supported endpoints.
-            for (const ExtrusionPath &path : loop.paths)
-                if (path.polyline.points.size() > 1)
-                    preferred_edges.insert(preferred_edges.end(), path.polyline.points.size() - 1, !is_bridge(path.role()));
+            // With no overhangs the entire loop is eligible: leave the mask
+            // empty instead of allocating and filling one bit per edge.
+            if (std::any_of(loop.paths.begin(), loop.paths.end(), [](const ExtrusionPath &path) { return is_bridge(path.role()); })) {
+                preferred_edges.reserve(polygon.points.size());
+                // Sample supported spans directly, not overhangs projected onto
+                // the same few supported endpoints.
+                for (const ExtrusionPath &path : loop.paths)
+                    if (path.polyline.points.size() > 1)
+                        preferred_edges.insert(preferred_edges.end(), path.polyline.points.size() - 1, !is_bridge(path.role()));
+            }
             seam_override = PurgeIntoInnerWalls::seam_point(polygon.points,
                 std::generate_canonical<double, std::numeric_limits<double>::digits>(m_purge_seam_rng), preferred_edges);
         }

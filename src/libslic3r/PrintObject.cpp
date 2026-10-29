@@ -614,15 +614,14 @@ void PrintObject::make_perimeters()
     // Surface::extra_perimeters (infill has not run yet, so regeneration is
     // safe). The purge allocation itself happens later, in
     // Print::_plan_purge_into_inner_walls().
-    {
-        const PrintConfig &purge_cfg = m_print->config();
+    const PrintConfig &purge_cfg = m_print->config();
+    if (purge_cfg.purge_into_inner_walls.getBool() && !purge_cfg.spiral_mode.getBool()
+        && purge_cfg.print_sequence != PrintSequence::ByObject && !m_layers.empty()) {
         bool any_preferred = false;
         for (const PrintObject *object : m_print->objects())
             any_preferred |= object->config().purge_into_inner_walls_preferred.getBool();
         const bool grow_here = this->config().purge_into_inner_walls_preferred.getBool() || !any_preferred;
-        if (purge_cfg.purge_into_inner_walls.getBool() && !purge_cfg.spiral_mode.getBool()
-            && purge_cfg.print_sequence != PrintSequence::ByObject
-            && grow_here && !m_layers.empty()) {
+        if (grow_here) {
             const float num_copies = float(std::max<size_t>(this->instances().size(), 1));
 
             // Filaments printing on a layer, from the region filament
@@ -663,9 +662,7 @@ void PrintObject::make_perimeters()
             std::vector<float> demand(m_layers.size(), 0.f);
             std::vector<std::map<unsigned int, float>> demand_by_filament(m_layers.size());
             {
-                std::vector<const PrintObject *> objects;
-                for (const PrintObject *object : m_print->objects())
-                    objects.push_back(object);
+                const auto &objects = m_print->objects();
                 int prev_filament = -1;
                 for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx) {
                     const coordf_t z = m_layers[layer_idx]->print_z;

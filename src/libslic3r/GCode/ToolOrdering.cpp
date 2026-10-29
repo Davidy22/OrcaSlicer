@@ -3604,9 +3604,12 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                 const bool matches_outer_wall = lt.wall_extruder_id(layerm->region()) == new_extruder;
                 if (wall.is_shell() && !matches_outer_wall)
                     continue;
+                const int inset_idx = coll->get_max_inset_idx();
+                const bool is_existing = coll->is_existing_purge_wall();
+                const float wall_volume = static_cast<float>(coll->total_volume());
                 for (unsigned int copy = 0; copy < num_of_copies; ++copy)
-                    candidates.push_back({coll, object, layerm, wall.shells, copy, coll->get_max_inset_idx(), matches_outer_wall,
-                                          coll->is_existing_purge_wall(), static_cast<float>(coll->total_volume())});
+                    candidates.push_back({coll, object, layerm, wall.shells, copy, inset_idx, matches_outer_wall,
+                                          is_existing, wall_volume});
             }
         }
 

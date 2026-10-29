@@ -258,7 +258,7 @@ static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perime
             loop_obj.is_purge_inner_wall_candidate = true;
             // Loops at wall_loops and deeper exist only because of extra_perimeters
             // (which the purge capacity planning bumps per surface); mark them as
-            // generated for purge so regular walls are consumed first at allocation.
+            // generated for purge for the equal-volume existing-wall tie-breaker.
             loop_obj.generated_for_purge = int(loop.depth) >= perimeter_generator.config->wall_loops.value;
         }
         coll.append(std::move(loop_obj));

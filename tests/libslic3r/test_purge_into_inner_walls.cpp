@@ -1,9 +1,13 @@
 // Test cases for purge into inner walls feature
 // Verifies that inner walls are properly tagged and extra walls are generated when needed
 
-#include <catch2/catch_all.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_message.hpp>
+#include <catch2/generators/catch_generators.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "libslic3r/Config.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/GCode/PurgeIntoInnerWalls.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
@@ -263,21 +267,21 @@ TEST_CASE("Purge flush volume estimate", "[PurgeIntoInnerWalls]")
     config.purge_in_prime_tower.value        = true;
     config.single_extruder_multi_material.value = true;
 
-    REQUIRE(estimate_flush_volume(config, 0, 1) == Catch::Approx(100.));
-    REQUIRE(estimate_flush_volume(config, 1, 0) == Catch::Approx(200.));
-    REQUIRE(estimate_flush_volume(config, 1, 1) == Catch::Approx(0.));
+    REQUIRE_THAT(estimate_flush_volume(config, 0, 1), Catch::Matchers::WithinAbs(100., 1e-4));
+    REQUIRE_THAT(estimate_flush_volume(config, 1, 0), Catch::Matchers::WithinAbs(200., 1e-4));
+    REQUIRE_THAT(estimate_flush_volume(config, 1, 1), Catch::Matchers::WithinAbs(0., 1e-4));
 
     config.flush_multiplier.values = { 2.0 };
-    REQUIRE(estimate_flush_volume(config, 0, 1) == Catch::Approx(200.));
+    REQUIRE_THAT(estimate_flush_volume(config, 0, 1), Catch::Matchers::WithinAbs(200., 1e-4));
 
     // Out-of-range filament falls back to the prime volume.
-    REQUIRE(estimate_flush_volume(config, 0, 5) == Catch::Approx(42.));
+    REQUIRE_THAT(estimate_flush_volume(config, 0, 5), Catch::Matchers::WithinAbs(42., 1e-4));
 
     // Without purging volumes on a single-extruder multi-material printer,
     // every toolchange purges the plain prime volume (belt semantics).
     config.purge_in_prime_tower.value = false;
-    REQUIRE(estimate_flush_volume(config, 0, 1) == Catch::Approx(42.));
-    REQUIRE(estimate_flush_volume(config, 1, 1) == Catch::Approx(0.));
+    REQUIRE_THAT(estimate_flush_volume(config, 0, 1), Catch::Matchers::WithinAbs(42., 1e-4));
+    REQUIRE_THAT(estimate_flush_volume(config, 1, 1), Catch::Matchers::WithinAbs(0., 1e-4));
 }
 
 TEST_CASE("Purge seam samples follow loop arc length rather than vertex indices", "[PurgeIntoInnerWalls][Regression]")
@@ -344,6 +348,16 @@ TEST_CASE("Purge seam sampling prefers supported spans without piling up at endp
     REQUIRE(zero_preferred.has_value());
     CHECK(zero_preferred->distance_to(Point::new_scale(15., 0.)) <= scaled<double>(0.000002));
     CHECK_FALSE(PurgeIntoInnerWalls::seam_point(rectangle, 0.5, {true}).has_value());
+    // Fully supported loops need no allocated mask. Omitting it must retain
+    // exactly the same starts, including edge boundaries and loop closure.
+    for (double fraction : {0., 0.01, 0.25, 0.5, 0.75, 0.99, 1.}) {
+        CAPTURE(fraction);
+        const auto unmasked = PurgeIntoInnerWalls::seam_point(rectangle, fraction);
+        const auto supported = PurgeIntoInnerWalls::seam_point(rectangle, fraction, std::vector<bool>(4, true));
+        REQUIRE(unmasked.has_value());
+        REQUIRE(supported.has_value());
+        CHECK(*unmasked == *supported);
+    }
 }
 
 TEST_CASE("Purge seam draws scatter identical loops and replay after an export reset", "[PurgeIntoInnerWalls][Regression]")
