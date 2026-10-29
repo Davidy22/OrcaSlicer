@@ -1,4 +1,3 @@
-#include "PurgeSupport.hpp"
 #include "../ClipperUtils.hpp"
 #include "../ClipperZUtils.hpp"
 #include "../ExtrusionEntityCollection.hpp"

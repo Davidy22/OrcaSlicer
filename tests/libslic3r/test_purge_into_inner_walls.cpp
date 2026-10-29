@@ -63,32 +63,6 @@ std::vector<ExtrusionEntityCollection::PurgeInnerWall> purge_test_walls(const Ex
 }
 } // namespace
 
-// Test that ExtrusionLoop purge metadata is properly set
-TEST_CASE("ExtrusionLoop purge metadata", "[PurgeIntoInnerWalls]")
-{
-    // Create a simple extrusion loop
-    ExtrusionPaths paths;
-    ExtrusionPath path(erPerimeter);
-    path.mm3_per_mm = 1.0;
-    path.width = 0.4f;
-    path.height = 0.2f;
-    paths.push_back(std::move(path));
-    
-    // Test default values (not a purge candidate)
-    ExtrusionLoop loop(std::move(paths), elrDefault);
-    REQUIRE(loop.is_purge_inner_wall_candidate == false);
-    REQUIRE(loop.generated_for_purge == false);
-    
-    // Test setting purge candidate metadata
-    loop.is_purge_inner_wall_candidate = true;
-    loop.generated_for_purge = false;
-    loop.inset_idx = 2;
-    
-    REQUIRE(loop.is_purge_inner_wall_candidate == true);
-    REQUIRE(loop.generated_for_purge == false);
-    REQUIRE(loop.inset_idx == 2);
-}
-
 // Test ExtrusionEntityCollection purge candidate detection
 TEST_CASE("ExtrusionEntityCollection purge candidate detection", "[PurgeIntoInnerWalls]")
 {
@@ -99,41 +73,17 @@ TEST_CASE("ExtrusionEntityCollection purge candidate detection", "[PurgeIntoInne
     REQUIRE(coll.is_existing_purge_wall() == false);
     REQUIRE(coll.get_max_inset_idx() == -1);
     
-    // Add a purge candidate loop (existing wall)
-    ExtrusionPaths paths;
-    ExtrusionPath path(erPerimeter);
-    path.mm3_per_mm = 1.0;
-    path.width = 0.4f;
-    path.height = 0.2f;
-    path.polyline = purge_test_loop(erPerimeter, 2).paths.front().polyline;
-    paths.push_back(std::move(path));
-    
-    ExtrusionLoop loop(std::move(paths), elrDefault);
-    loop.is_purge_inner_wall_candidate = true;
-    loop.generated_for_purge = false;  // existing wall
-    loop.inset_idx = 2;
-    coll.append(std::move(loop));
-    
+    // Add a purge candidate loop (existing wall).
+    coll.append(purge_test_loop(erPerimeter, 2));
+
     // Verify detection
     REQUIRE(coll.is_purge_inner_wall_candidate() == true);
     REQUIRE(coll.is_existing_purge_wall() == true);
     REQUIRE(coll.get_max_inset_idx() == 2);
     
-    // Add a generated purge wall (extra wall)
-    ExtrusionPaths paths2;
-    ExtrusionPath path2(erPerimeter);
-    path2.mm3_per_mm = 1.0;
-    path2.width = 0.4f;
-    path2.height = 0.2f;
-    path2.polyline = purge_test_loop(erPerimeter, 3).paths.front().polyline;
-    paths2.push_back(std::move(path2));
-    
-    ExtrusionLoop loop2(std::move(paths2), elrDefault);
-    loop2.is_purge_inner_wall_candidate = true;
-    loop2.generated_for_purge = true;  // extra wall
-    loop2.inset_idx = 3;
-    coll.append(std::move(loop2));
-    
+    // Add a generated purge wall (extra wall).
+    coll.append(purge_test_loop(erPerimeter, 3, true));
+
     // Verify mixed detection
     REQUIRE(coll.is_purge_inner_wall_candidate() == true);
     REQUIRE(coll.is_existing_purge_wall() == true);  // still has existing walls

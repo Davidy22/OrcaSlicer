@@ -87,6 +87,37 @@ void init_purge_print(Print &print, Model &model, const DynamicPrintConfig &conf
 }
 } // namespace
 
+TEST_CASE("Both perimeter generators preserve native depths independently of purge tagging", "[PurgeIntoInnerWalls][Regression]")
+{
+    const char *generator = GENERATE("classic", "arachne");
+    const bool enabled = GENERATE(false, true);
+    CAPTURE(generator, enabled);
+    Model model;
+    Print print;
+    auto config = purge_config(generator, 4, false, 1);
+    config.set_deserialize_strict({{"purge_into_inner_walls", enabled}, {"prime_volume", 0.}});
+    Test::init_print({make_cube(20., 20., 1.)}, print, model, config);
+    print.process();
+    std::set<int> depths;
+    const int native_path_depth = ExtrusionPath(erPerimeter).inset_idx;
+    for (const PrintObject *object : print.objects())
+        for (const Layer *layer : object->layers())
+            for (const LayerRegion *region : layer->regions())
+                for_each_extrusion_leaf(region->perimeters, [&](const ExtrusionEntity &entity) {
+                    if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity)) {
+                        REQUIRE(loop->inset_idx >= 0);
+                        depths.insert(loop->inset_idx);
+                        const bool candidate = enabled && loop->inset_idx > 0;
+                        CHECK(loop->is_purge_inner_wall_candidate == candidate);
+                        CHECK_FALSE(loop->generated_for_purge);
+                        for (const ExtrusionPath &path : loop->paths)
+                            CHECK(path.inset_idx == native_path_depth);
+                    }
+                });
+    CHECK(depths.count(0) == 1);
+    CHECK(depths.count(1) == 1);
+}
+
 TEST_CASE("Purge overrides and emitted colors are restricted to inner walls", "[PurgeIntoInnerWalls][Regression]")
 {
     const char *generator = GENERATE("classic", "arachne");

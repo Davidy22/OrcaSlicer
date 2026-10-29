@@ -7,7 +7,6 @@
 #include "libslic3r.h"
 #include "BoundingBox.hpp"
 #include "Flow.hpp"
-#include "Support/PurgeSupport.hpp"
 #include "SurfaceCollection.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include <vector>
@@ -15,6 +14,7 @@
 #include <algorithm>
 #include <string>
 #include <functional>
+#include <memory>
 #include "ExPolygon.hpp"
 
 namespace Slic3r { class ExtrusionLoop; }
@@ -321,13 +321,30 @@ enum SupportInnerType {
 class SupportLayer : public Layer
 {
 public:
+    // Growth/replanning state for existing support-fill groups, shared by normal and tree supports.
+    class PurgeRegion
+    {
+    public:
+        PurgeRegion(ExtrusionEntityCollection &paths, ExPolygons areas, const Flow &flow, size_t base_wall_count);
+        void reset();
+        double grow(double additional_volume);
+        const ExtrusionEntityCollection *collection() const { return m_paths; }
+
+    private:
+        ExtrusionEntityCollection *m_paths;
+        ExPolygons m_areas;
+        Flow m_flow;
+        size_t m_base_wall_count;
+        std::unique_ptr<ExtrusionEntityCollection> m_original;
+    };
+
     // Polygons covered by the supports: base, interface and contact areas.
     // Used to suppress retraction if moving for a support extrusion over these support_islands.
     ExPolygons                  support_islands;
     // Extrusion paths for the support base and for the support interface and contacts.
     ExtrusionEntityCollection   support_fills;
     // Runtime-only support wall growth, registered only in inner-wall purge mode.
-    std::vector<PurgeSupportRegion> purge_support_regions;
+    std::vector<PurgeRegion> purge_support_regions;
     SupportInnerType            support_type = stInnerNormal;
 
     // for tree supports

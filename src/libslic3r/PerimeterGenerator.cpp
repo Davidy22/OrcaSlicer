@@ -248,7 +248,6 @@ static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perime
             path.mm3_per_mm = extrusion_mm3_per_mm;
             path.width = extrusion_width;
             path.height     = (float)perimeter_generator.layer_height;
-            path.inset_idx = loop.depth;
             paths.emplace_back(std::move(path));
         }
 
@@ -569,15 +568,9 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
 
         // Append paths to collection.
         if (!paths.empty()) {
-            // Set inset_idx on all paths before creating the loop
-            for (ExtrusionPath& path : paths) {
-                path.inset_idx = extrusion->inset_idx;
-            }
-            
             if (extrusion->is_closed) {
                 ExtrusionLoop extrusion_loop(std::move(paths), pg_extrusion.is_contour ? elrDefault : elrHole);
-                if (perimeter_generator.print_config->purge_into_inner_walls)
-                    extrusion_loop.inset_idx = extrusion->inset_idx;
+                extrusion_loop.inset_idx = extrusion->inset_idx;
 
                 // ORCA: Purge into inner walls - tag inner walls (non-external) as purge candidates
                 if (extrusion->inset_idx > 0 && perimeter_generator.print_config->purge_into_inner_walls.getBool()) {

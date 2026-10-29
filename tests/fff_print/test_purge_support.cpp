@@ -16,7 +16,6 @@
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
-#include "libslic3r/Support/PurgeSupport.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/libslic3r.h"
 
@@ -29,6 +28,22 @@ using Catch::Matchers::WithinAbs;
 using Catch::Matchers::WithinRel;
 
 namespace {
+size_t support_loop_count(const ExtrusionEntityCollection &paths)
+{
+    size_t count = 0;
+    for_each_extrusion_leaf(paths, [&](const ExtrusionEntity &entity) { count += entity.is_loop(); });
+    return count;
+}
+
+double support_volume(const Print &print)
+{
+    double volume = 0.;
+    for (const PrintObject *object : print.objects())
+        for (const SupportLayer *support : object->support_layers())
+            volume += support->support_fills.total_volume();
+    return volume;
+}
+
 DynamicPrintConfig support_purge_config(const char *style, double demand, unsigned int filaments = 2)
 {
     const bool normal = std::string(style) == "normal";
@@ -165,7 +180,6 @@ TEST_CASE("Supports absorb residual purge after model walls and grow past two lo
     init_support_purge(print, model, config, true);
     print.process();
     REQUIRE(support_overrides(print) > 0);
-    size_t grown_regions = 0;
     size_t purged_support_loops = 0;
     bool copies_differ = false;
     for (const LayerTools &tools : print.tool_ordering()) {
@@ -173,9 +187,6 @@ TEST_CASE("Supports absorb residual purge after model walls and grow past two lo
         for (const PrintObject *object : print.objects())
             if (const SupportLayer *support = object->get_support_layer_at_printz(tools.print_z, EPSILON)) {
                 CHECK(object->config().tree_support_wall_count.value == 2); // runtime growth, not a preset mutation
-                for (const PurgeSupportRegion &region : support->purge_support_regions)
-                    if (region.wall_count() > 2)
-                        ++grown_regions;
                 for_each_extrusion_leaf(support->support_fills, [&](const ExtrusionEntity &entity) {
                     const auto &wiping = tools.wiping_extrusions();
                     for (size_t copy = 0; copy < object->instances().size(); ++copy)
@@ -199,13 +210,27 @@ TEST_CASE("Supports absorb residual purge after model walls and grow past two lo
                                     for (size_t copy = 0; copy < object->instances().size(); ++copy)
                                         CHECK(tools.wiping_extrusions().is_entity_overridden(walls, object, copy));
     }
-    CHECK(grown_regions > 0);
     CHECK(purged_support_loops > 0);
     CHECK(copies_differ);
     check_support_export(print);
+
+    // Inspect the real geometry after export, before restoring the native paths.
+    size_t grown_regions = 0;
+    for (const PrintObject *object : print.objects())
+        for (SupportLayer *support : object->support_layers())
+            for (auto &region : support->purge_support_regions) {
+                const double grown_volume = region.collection()->total_volume();
+                const size_t loops = support_loop_count(*region.collection());
+                region.reset();
+                if (grown_volume > region.collection()->total_volume() + EPSILON) {
+                    ++grown_regions;
+                    CHECK(loops > 2);
+                }
+            }
+    CHECK(grown_regions > 0);
 }
 
-TEST_CASE("Sufficient model walls leave support paths and wall counts unclaimed", "[PurgeSupport][PurgeIntoInnerWalls]")
+TEST_CASE("Sufficient model walls leave native support paths unchanged", "[PurgeSupport][PurgeIntoInnerWalls]")
 {
     Model model;
     Print print;
@@ -215,10 +240,14 @@ TEST_CASE("Sufficient model walls leave support paths and wall counts unclaimed"
     CHECK(support_overrides(print) == 0);
     size_t support_regions = 0;
     for (const PrintObject *object : print.objects())
-        for (const SupportLayer *support : object->support_layers())
-            for (const PurgeSupportRegion &region : support->purge_support_regions) {
+        for (SupportLayer *support : object->support_layers())
+            for (auto &region : support->purge_support_regions) {
                 ++support_regions;
-                CHECK(region.wall_count() <= 2);
+                const double native_volume = region.collection()->total_volume();
+                const ExtrusionEntitiesPtr native_paths = region.collection()->entities;
+                region.reset();
+                CHECK(region.collection()->entities == native_paths);
+                CHECK_THAT(region.collection()->total_volume(), WithinAbs(native_volume, 1e-6));
             }
     REQUIRE(support_regions > 0);
 }
@@ -260,13 +289,8 @@ TEST_CASE("Replanning removes unneeded support growth and disabling purge regene
     auto config = support_purge_config("normal", 60.);
     init_support_purge(print, model, config);
     print.process();
-    size_t grown = 0;
-    for (const PrintObject *object : print.objects())
-        for (const SupportLayer *support : object->support_layers())
-            for (const PurgeSupportRegion &region : support->purge_support_regions)
-                if (region.wall_count() > 2)
-                    ++grown;
-    REQUIRE(grown > 0);
+    REQUIRE(support_overrides(print) > 0);
+    const double grown_volume = support_volume(print);
     config.set_deserialize_strict({{"prime_volume", 0.01}});
     print.apply(model, config);
     CHECK_FALSE(print.is_step_done(psWipeTower));
@@ -274,10 +298,14 @@ TEST_CASE("Replanning removes unneeded support growth and disabling purge regene
         CHECK_FALSE(object->is_step_done(posSimplifySupportPath));
     print.process();
     CHECK(support_overrides(print) == 0);
+    CHECK(support_volume(print) < grown_volume);
     for (const PrintObject *object : print.objects())
-        for (const SupportLayer *support : object->support_layers())
-            for (const PurgeSupportRegion &region : support->purge_support_regions)
-                CHECK(region.wall_count() <= 2);
+        for (SupportLayer *support : object->support_layers())
+            for (auto &region : support->purge_support_regions) {
+                const double native_volume = region.collection()->total_volume();
+                region.reset();
+                CHECK_THAT(region.collection()->total_volume(), WithinAbs(native_volume, 1e-6));
+            }
 
     config.set_deserialize_strict({{"purge_into_inner_walls", false}});
     print.apply(model, config);
@@ -317,4 +345,20 @@ TEST_CASE("Protected material changes do not add a fictitious purge transition",
     CHECK_THAT(wiping.mark_wiping_extrusions(print, 0, 2, demand, stats), WithinAbs(demand, 1e-4));
     CHECK_THAT(wiping.mark_wiping_extrusions(print, 2, 1, demand, stats), WithinAbs(demand, 1e-4));
     CHECK_THAT(wiping.mark_wiping_extrusions(print, 1, 3, demand, stats), WithinAbs(0., 1e-4));
+}
+
+TEST_CASE("Protected purge transitions stay blocked with inner-wall mode on or off", "[PurgeSupport][PurgeIntoInnerWalls][Regression]")
+{
+    const bool enabled = GENERATE(false, true);
+    const bool old_support = GENERATE(false, true);
+    const bool new_support = GENERATE(false, true);
+    const bool old_soluble = GENERATE(false, true);
+    const bool new_soluble = GENERATE(false, true);
+    CAPTURE(enabled, old_support, new_support, old_soluble, new_soluble);
+    PrintConfig config;
+    config.purge_into_inner_walls.value = enabled;
+    config.filament_is_support.values = {old_support, new_support};
+    config.filament_soluble.values = {old_soluble, new_soluble};
+    const bool expected = !old_soluble && !new_soluble && !old_support && !new_support;
+    CHECK(WipingExtrusions::can_purge(config, 0, 1) == expected);
 }

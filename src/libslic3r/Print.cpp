@@ -30,7 +30,6 @@
 #include <ostream>
 #include "ExPolygon.hpp"
 #include "Layer.hpp"
-#include "Support/PurgeSupport.hpp"
 #include "FilamentGroup.hpp"
 #include <memory>
 #include "FilamentGroupUtils.hpp"
@@ -5496,10 +5495,10 @@ void Print::_plan_purge_into_inner_walls()
                 const std::unordered_set<const ExtrusionEntity *> groups(
                     support->support_fills.entities.begin(), support->support_fills.entities.end());
                 auto &regions = support->purge_support_regions;
-                regions.erase(std::remove_if(regions.begin(), regions.end(), [&](const PurgeSupportRegion &region) {
+                regions.erase(std::remove_if(regions.begin(), regions.end(), [&](const SupportLayer::PurgeRegion &region) {
                     return groups.count(region.collection()) == 0;
                 }), regions.end());
-                for (PurgeSupportRegion &region : regions)
+                for (SupportLayer::PurgeRegion &region : regions)
                     region.reset();
             }
 
@@ -5560,7 +5559,7 @@ void Print::_plan_purge_into_inner_walls()
                 it->second += object->instances().size();
         }
         for (const auto &[support, copies] : supports) {
-            for (PurgeSupportRegion &region : support->purge_support_regions) {
+            for (SupportLayer::PurgeRegion &region : support->purge_support_regions) {
                 deficit -= region.grow(deficit / double(copies)) * double(copies);
                 if (deficit <= EPSILON)
                     break;
