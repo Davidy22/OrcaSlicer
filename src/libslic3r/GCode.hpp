@@ -42,6 +42,7 @@
 #include <map>
 #include <unordered_map>
 #include <optional>
+#include <random>
 #include <set>
 #include <string>
 #include <cfloat>
@@ -766,6 +767,7 @@ protected:
     // Active only while emitting overridden model walls in the purge pass.
     bool                                m_purge_wall = false;
     size_t                              m_purge_wall_index = 0;
+    std::minstd_rand                     m_purge_seam_rng;
     AvoidCrossingPerimeters             m_avoid_crossing_perimeters;
     RetractWhenCrossingPerimeters       m_retract_when_crossing_perimeters;
     TimelapsePosPicker                  m_timelapse_pos_picker;

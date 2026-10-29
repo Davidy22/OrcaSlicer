@@ -1721,7 +1721,7 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
 }
 
 void SeamPlacer::place_seam(const Layer *layer, ExtrusionLoop &loop,
-                            const Point &last_pos, float& overhang) const {
+                            const Point &last_pos, float& overhang, const std::optional<Point> &seam_override) const {
   using namespace SeamPlacerImpl;
   const PrintObject *po = layer->object();
   // Must not be called with supprot layer.
@@ -1730,6 +1730,20 @@ void SeamPlacer::place_seam(const Layer *layer, ExtrusionLoop &loop,
   assert(layer->id() >= po->slicing_parameters().raft_layers());
   const size_t layer_index = layer->id() - po->slicing_parameters().raft_layers();
   const double unscaled_z = layer->slice_z;
+
+  if (seam_override) {
+    const PrintObjectSeamData::LayerSeams &layer_perimeters =
+        m_seam_per_object.find(layer->object())->second.layers[layer_index];
+    // Purge starts must not inherit (or modify) the exterior's aligned/painted
+    // seam. Keep the usual non-overhang preference and scarf overhang data.
+    const Point seam_point = loop.get_closest_path_and_point(*seam_override, true).foot_pt;
+    const size_t index = find_closest_point(*layer_perimeters.points_tree,
+                                           to_3d(unscaled<float>(seam_point), float(unscaled_z)));
+    overhang = layer_perimeters.points[index].unsupported_dist;
+    if (!loop.split_at_vertex(seam_point, scaled<double>(0.0015)))
+      loop.split_at(seam_point, true);
+    return;
+  }
 
   auto get_next_loop_point = [loop](ExtrusionLoop::ClosestPathPoint current) {
     current.segment_idx += 1;

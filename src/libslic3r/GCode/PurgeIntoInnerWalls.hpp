@@ -3,9 +3,53 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cmath>
+#include <optional>
 #include <tuple>
+#include <vector>
+
+#include "libslic3r/Point.hpp"
+#include "libslic3r/libslic3r.h"
 
 namespace Slic3r::PurgeIntoInnerWalls {
+
+// Sample the closed loop by arc length, not vertex index: a long straight
+// wall must be as likely a target as the same wall split into many segments.
+// Prefer the masked edges if any have length; otherwise use the whole loop.
+inline std::optional<Point> seam_point(const Points &polygon, double fraction,
+                                       const std::vector<bool> &preferred_edges = {})
+{
+    if (polygon.size() < 2 || !std::isfinite(fraction))
+        return std::nullopt;
+    if (!preferred_edges.empty() && preferred_edges.size() != polygon.size())
+        return std::nullopt;
+    double perimeter = 0., preferred_perimeter = 0.;
+    for (size_t i = 0; i < polygon.size(); ++i) {
+        const double length = (polygon[(i + 1) % polygon.size()].cast<double>() - polygon[i].cast<double>()).norm();
+        perimeter += length;
+        if (!preferred_edges.empty() && preferred_edges[i])
+            preferred_perimeter += length;
+    }
+    if (perimeter <= 0.)
+        return std::nullopt;
+
+    const bool use_preferred = preferred_perimeter > 0.;
+    double distance = std::clamp(fraction, 0., 1.) * (use_preferred ? preferred_perimeter : perimeter);
+    Point last_point = polygon.front();
+    for (size_t i = 0; i < polygon.size(); ++i) {
+        if (use_preferred && !preferred_edges[i])
+            continue;
+        const Vec2d edge = polygon[(i + 1) % polygon.size()].cast<double>() - polygon[i].cast<double>();
+        const double length = edge.norm();
+        if (length <= 0.)
+            continue;
+        last_point = polygon[(i + 1) % polygon.size()];
+        if (distance <= length)
+            return Point((polygon[i].cast<double>() + edge * (distance / length)).cast<coord_t>());
+        distance -= length;
+    }
+    return last_point; // accumulated rounding at fraction 1
+}
 
 // Larger keys are allocated first: preferred objects, then the largest loop
 // volumes. Color, depth and existing capacity only break equal-volume ties;

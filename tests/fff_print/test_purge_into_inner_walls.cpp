@@ -25,6 +25,8 @@
 #include <cstddef>
 #include <cmath>
 #include <limits>
+#include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -431,6 +433,112 @@ TEST_CASE("Matching purge filament occupies the walls nearest the exterior", "[P
         for (const ExtrusionEntity *entity : region->perimeters.entities)
             for (size_t copy = 0; copy < copies; ++copy)
                 CHECK(wiping.get_extruder_override(entity, other, copy) < 0);
+}
+
+TEST_CASE("Only purged inner wall seams scatter across layers and copies", "[PurgeIntoInnerWalls][Regression]")
+{
+    const char *generator = GENERATE("classic", "arachne");
+    const bool enabled = GENERATE(false, true);
+    const bool infill_first = GENERATE(false, true);
+    CAPTURE(generator, enabled, infill_first);
+    DynamicPrintConfig config = purge_config(generator, 6);
+    config.set_deserialize_strict({
+        {"purge_into_inner_walls", enabled},
+        {"is_infill_first", infill_first},
+        {"prime_volume", 12.}, // more than one 20 mm cube loop, so both copies purge
+        {"line_width", 0.45},
+        {"inner_wall_line_width", 0.45},
+        {"outer_wall_line_width", 0.45},
+        {"initial_layer_line_width", 0.45},
+        {"seam_position", "back"},
+        {"staggered_inner_seams", false},
+        {"seam_slope_type", "none"},
+        {"enable_arc_fitting", false},
+        {"wipe_inward", false},
+        {"use_relative_e_distances", false},
+        {"change_filament_gcode", ";TEST_PURGE_START\n"},
+    });
+    Model model;
+    Print print;
+    init_purge_print(print, model, config, true, 2);
+
+    struct SeamSamples {
+        std::map<std::pair<size_t, size_t>, Points> purged;
+        std::set<float> purge_layers;
+        size_t ordinary_inner = 0;
+        size_t exterior = 0;
+    };
+    const auto collect = [&](const std::string &gcode) {
+        SeamSamples samples;
+        bool purging = false;
+        bool travelled = true;
+        std::string role;
+        GCodeReader reader;
+        reader.apply_config(config);
+        reader.parse_buffer(gcode, [&](GCodeReader &state, const GCodeReader::GCodeLine &line) {
+            const std::string comment(line.comment());
+            if (comment == "TEST_PURGE_START")
+                purging = true;
+            else if (comment.find("PURGING FINISHED") != std::string::npos)
+                purging = false;
+            else if (comment.rfind("TYPE:", 0) == 0)
+                role = comment.substr(5);
+            const bool move = line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3");
+            if (move && !line.extruding(state) && line.dist_XY(state) > 1e-4f)
+                travelled = true;
+            if (!line.extruding(state) || line.dist_XY(state) <= 1e-4f || !travelled)
+                return;
+            travelled = false;
+            if (state.z() <= 0.201f || (role != "Inner wall" && role != "Outer wall"))
+                return;
+            for (size_t object = 0; object < print.objects().size(); ++object) {
+                const auto &instances = print.objects()[object]->instances();
+                for (size_t copy = 0; copy < instances.size(); ++copy) {
+                    const BoundingBoxf3 box = instances[copy].get_bounding_box();
+                    if (state.x() < box.min.x() || state.x() > box.max.x() ||
+                        state.y() < box.min.y() || state.y() > box.max.y())
+                        continue;
+                    const Point local = Point::new_scale(state.x() - box.min.x(), state.y() - box.min.y());
+                    if (enabled && purging && role == "Inner wall") {
+                        samples.purged[{object, copy}].push_back(local);
+                        samples.purge_layers.insert(state.z());
+                    } else {
+                        // Independent purge starts must not move the exterior's
+                        // cached rear seam, or the ordinary inner-wall seams.
+                        CHECK(state.y() > box.center().y());
+                        if (role == "Inner wall")
+                            ++samples.ordinary_inner;
+                        else
+                            ++samples.exterior;
+                    }
+                    return;
+                }
+            }
+            FAIL("Wall seam does not belong to any printed instance");
+        });
+        return samples;
+    };
+    const SeamSamples samples = collect(Test::gcode(print));
+    REQUIRE(samples.exterior > 0);
+    REQUIRE(samples.ordinary_inner > 0);
+    if (enabled) {
+        REQUIRE(samples.purged.size() == 2);
+        CHECK(samples.purge_layers.size() > 1);
+        for (const auto &[instance, seams] : samples.purged) {
+            CAPTURE(instance.first, instance.second);
+            REQUIRE(seams.size() > 2);
+            CHECK(std::any_of(seams.begin(), seams.end(), [](const Point &p) { return p.y() < scale_(10.); }));
+            Points distinct = seams;
+            std::sort(distinct.begin(), distinct.end());
+            distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
+            CHECK(distinct.size() > 2);
+        }
+        CHECK(samples.purged.at({0, 0}).front() != samples.purged.at({0, 1}).front());
+        // Re-exporting must replay the sequence, not continue a previous export.
+        const SeamSamples replay = collect(Test::gcode(print));
+        CHECK(replay.purged == samples.purged);
+    } else
+        CHECK(samples.purged.empty());
 }
 
 TEST_CASE("Only purge-designated inner walls use purge speeds in exported G-code", "[PurgeIntoInnerWalls][Regression]")

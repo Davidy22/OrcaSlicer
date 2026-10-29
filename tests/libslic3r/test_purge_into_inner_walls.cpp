@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <limits>
+#include <random>
 #include <utility>
 
 using namespace Slic3r;
@@ -277,6 +278,107 @@ TEST_CASE("Purge flush volume estimate", "[PurgeIntoInnerWalls]")
     config.purge_in_prime_tower.value = false;
     REQUIRE(estimate_flush_volume(config, 0, 1) == Catch::Approx(42.));
     REQUIRE(estimate_flush_volume(config, 1, 1) == Catch::Approx(0.));
+}
+
+TEST_CASE("Purge seam samples follow loop arc length rather than vertex indices", "[PurgeIntoInnerWalls][Regression]")
+{
+    const Points rectangle{Point::new_scale(0., 0.), Point::new_scale(20., 0.),
+                           Point::new_scale(20., 10.), Point::new_scale(0., 10.)};
+    const std::vector<std::pair<double, Point>> samples{
+        {0., Point::new_scale(0., 0.)}, {0.25, Point::new_scale(15., 0.)},
+        {0.5, Point::new_scale(20., 10.)}, {0.75, Point::new_scale(5., 10.)},
+        {55. / 60., Point::new_scale(0., 5.)}, {1., Point::new_scale(0., 0.)},
+    };
+    for (const auto &[fraction, expected] : samples) {
+        CAPTURE(fraction);
+        const auto point = PurgeIntoInnerWalls::seam_point(rectangle, fraction);
+        REQUIRE(point.has_value());
+        CHECK(point->distance_to(expected) <= scaled<double>(0.000002));
+    }
+}
+
+TEST_CASE("Purge seam sampling tolerates duplicate vertices and rejects empty loops", "[PurgeIntoInnerWalls][Regression]")
+{
+    const Points rectangle{Point::new_scale(0., 0.), Point::new_scale(20., 0.),
+                           Point::new_scale(20., 10.), Point::new_scale(0., 10.)};
+    Points subdivided;
+    for (int x = 0; x <= 20; ++x)
+        subdivided.push_back(Point::new_scale(double(x), 0.));
+    subdivided.insert(subdivided.end(), {rectangle[2], rectangle[3], rectangle[0], rectangle[0]});
+    for (double fraction : {0., 0.01, 0.25, 0.5, 0.75, 0.99, 1.}) {
+        CAPTURE(fraction);
+        const auto sparse = PurgeIntoInnerWalls::seam_point(rectangle, fraction);
+        const auto dense = PurgeIntoInnerWalls::seam_point(subdivided, fraction);
+        REQUIRE(sparse.has_value());
+        REQUIRE(dense.has_value());
+        CHECK(sparse->distance_to(*dense) <= scaled<double>(0.000002));
+    }
+    CHECK_FALSE(PurgeIntoInnerWalls::seam_point({}, 0.5).has_value());
+    CHECK_FALSE(PurgeIntoInnerWalls::seam_point(Points(4, rectangle.front()), 0.5).has_value());
+    CHECK_FALSE(PurgeIntoInnerWalls::seam_point(rectangle, std::numeric_limits<double>::quiet_NaN()).has_value());
+    CHECK_FALSE(PurgeIntoInnerWalls::seam_point(rectangle, std::numeric_limits<double>::infinity()).has_value());
+}
+
+TEST_CASE("Purge seam sampling prefers supported spans without piling up at endpoints", "[PurgeIntoInnerWalls][Regression]")
+{
+    const Points rectangle{Point::new_scale(0., 0.), Point::new_scale(20., 0.),
+                           Point::new_scale(20., 10.), Point::new_scale(0., 10.)};
+    const std::vector<bool> bottom_only{true, false, false, false};
+    for (double fraction : {0., 0.25, 0.5, 0.75, 1.}) {
+        CAPTURE(fraction);
+        const auto point = PurgeIntoInnerWalls::seam_point(rectangle, fraction, bottom_only);
+        REQUIRE(point.has_value());
+        CHECK(point->distance_to(Point::new_scale(20. * fraction, 0.)) <= scaled<double>(0.000002));
+    }
+    // Two separated supported spans must not acquire a fictitious join or
+    // concentrate starts at the nearest supported endpoint.
+    const auto opposite = PurgeIntoInnerWalls::seam_point(rectangle, 0.75, {true, false, true, false});
+    REQUIRE(opposite.has_value());
+    CHECK(opposite->distance_to(Point::new_scale(10., 10.)) <= scaled<double>(0.000002));
+    const auto all_overhang = PurgeIntoInnerWalls::seam_point(rectangle, 0.25, std::vector<bool>(4, false));
+    REQUIRE(all_overhang.has_value());
+    CHECK(all_overhang->distance_to(Point::new_scale(15., 0.)) <= scaled<double>(0.000002));
+    Points duplicate = rectangle;
+    duplicate.insert(duplicate.begin(), rectangle.front());
+    const auto zero_preferred = PurgeIntoInnerWalls::seam_point(duplicate, 0.25, {true, false, false, false, false});
+    REQUIRE(zero_preferred.has_value());
+    CHECK(zero_preferred->distance_to(Point::new_scale(15., 0.)) <= scaled<double>(0.000002));
+    CHECK_FALSE(PurgeIntoInnerWalls::seam_point(rectangle, 0.5, {true}).has_value());
+}
+
+TEST_CASE("Purge seam draws scatter identical loops and replay after an export reset", "[PurgeIntoInnerWalls][Regression]")
+{
+    const Points rectangle{Point::new_scale(0., 0.), Point::new_scale(20., 0.),
+                           Point::new_scale(20., 10.), Point::new_scale(0., 10.)};
+    std::minstd_rand rng;
+    Points seams;
+    for (size_t loop = 0; loop < 32; ++loop) {
+        const auto point = PurgeIntoInnerWalls::seam_point(rectangle,
+            std::generate_canonical<double, std::numeric_limits<double>::digits>(rng));
+        REQUIRE(point.has_value());
+        CHECK(point->x() >= scale_(0.));
+        CHECK(point->x() <= scale_(20.));
+        CHECK(point->y() >= scale_(0.));
+        CHECK(point->y() <= scale_(10.));
+        const coord_t boundary_distance = std::min({point->x(), scaled<coord_t>(20.) - point->x(),
+                                                     point->y(), scaled<coord_t>(10.) - point->y()});
+        CHECK(boundary_distance == 0);
+        seams.push_back(*point);
+    }
+    CHECK(std::any_of(seams.begin(), seams.end(), [](const Point &p) { return p.x() < scale_(5.); }));
+    CHECK(std::any_of(seams.begin(), seams.end(), [](const Point &p) { return p.x() > scale_(15.); }));
+    CHECK(std::any_of(seams.begin(), seams.end(), [](const Point &p) { return p.y() < scale_(2.5); }));
+    CHECK(std::any_of(seams.begin(), seams.end(), [](const Point &p) { return p.y() > scale_(7.5); }));
+
+    rng.seed();
+    for (const Point &expected : seams) {
+        const auto replay = PurgeIntoInnerWalls::seam_point(rectangle,
+            std::generate_canonical<double, std::numeric_limits<double>::digits>(rng));
+        REQUIRE(replay.has_value());
+        CHECK(*replay == expected);
+    }
+    std::sort(seams.begin(), seams.end());
+    CHECK(std::unique(seams.begin(), seams.end()) == seams.end());
 }
 
 TEST_CASE("Purge wall priority favors preferred objects then the largest loop volumes", "[PurgeIntoInnerWalls][Regression]")

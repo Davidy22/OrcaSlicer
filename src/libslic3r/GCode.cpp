@@ -82,6 +82,7 @@
 #include <stdexcept>
 #include <set>
 #include <optional>
+#include <random>
 #include <stdlib.h>
 #include <string>
 #include <system_error>
@@ -3330,6 +3331,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
 
     m_fan_mover.reset();
     m_ordering_cache.clear();
+    // A repeatable, independent sequence across layers, copies and toolchanges.
+    // Never restart it per layer/tool: identical loops would stack their seams.
+    m_purge_seam_rng.seed();
 
     // Belt printer: initialize belt-specific writer via virtual hook.
     this->init_belt_writer(print);
@@ -8392,7 +8396,20 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
     float seam_overhang = std::numeric_limits<float>::lowest();
     if (!m_config.spiral_mode && description == "perimeter") {
         assert(m_layer != nullptr);
-        m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang);
+        std::optional<Point> seam_override;
+        if (m_purge_wall && is_perimeter(loop.role()) && !is_external_perimeter(loop.role())) {
+            const Polygon polygon = loop.polygon();
+            std::vector<bool> preferred_edges;
+            preferred_edges.reserve(polygon.points.size());
+            // Sample non-overhang spans directly, rather than projecting random
+            // overhang starts onto the same few supported endpoints.
+            for (const ExtrusionPath &path : loop.paths)
+                if (path.polyline.points.size() > 1)
+                    preferred_edges.insert(preferred_edges.end(), path.polyline.points.size() - 1, !is_bridge(path.role()));
+            seam_override = PurgeIntoInnerWalls::seam_point(polygon.points,
+                std::generate_canonical<double, std::numeric_limits<double>::digits>(m_purge_seam_rng), preferred_edges);
+        }
+        m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang, seam_override);
     } else
         loop.split_at(last_pos, false);
 
