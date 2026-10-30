@@ -510,13 +510,16 @@ void PrintObject::make_perimeters()
     m_print->set_status(15, L("Generating walls"));
     BOOST_LOG_TRIVIAL(info) << "Generating walls..." << log_memory_info();
 
-    // Revert the typed slices into untyped slices.
-    if (m_typed_slices) {
+    // Restore native slices even if purge growth was interrupted before
+    // prepare_infill() typed them. Otherwise its extra wall counts survive
+    // a lower-demand replan or disabling purge.
+    if (m_typed_slices || m_purge_extra_perimeters) {
         for (Layer *layer : m_layers) {
             layer->restore_untyped_slices();
             m_print->throw_if_canceled();
         }
         m_typed_slices = false;
+        m_purge_extra_perimeters = false;
     }
 
     // compare each layer to the one below, and mark those slices needing
@@ -618,11 +621,17 @@ void PrintObject::make_perimeters()
     if (purge_cfg.purge_into_inner_walls.getBool() && !purge_cfg.spiral_mode.getBool()
         && purge_cfg.print_sequence != PrintSequence::ByObject && !m_layers.empty()) {
         bool any_preferred = false;
-        for (const PrintObject *object : m_print->objects())
+        size_t num_instances = std::max<size_t>(this->instances().size(), 1);
+        for (const PrintObject *object : m_print->objects()) {
             any_preferred |= object->config().purge_into_inner_walls_preferred.getBool();
+            // Shared layers are generated only here, but printed by every
+            // recipient. Credit their copies before deciding to add walls.
+            if (object->get_shared_object() == this)
+                num_instances += std::max<size_t>(object->instances().size(), 1);
+        }
         const bool grow_here = this->config().purge_into_inner_walls_preferred.getBool() || !any_preferred;
         if (grow_here) {
-            const float num_copies = float(std::max<size_t>(this->instances().size(), 1));
+            const float num_copies = float(num_instances);
 
             // Filaments printing on a layer, from the region filament
             // assignments (1-based ids -> 0-based matrix indices, like
@@ -772,6 +781,8 @@ void PrintObject::make_perimeters()
                 }
                 if (!changed)
                     break;
+                // Set before workers can mutate slices or throw on cancellation.
+                m_purge_extra_perimeters = true;
                 tbb::parallel_for(
                     tbb::blocked_range<size_t>(0, m_layers.size()),
                     [this, &extra_loops, &applied_loops](const tbb::blocked_range<size_t> &range) {

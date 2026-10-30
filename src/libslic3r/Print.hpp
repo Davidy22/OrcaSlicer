@@ -702,6 +702,8 @@ private:
     // this is set to true when LayerRegion->slices is split in top/internal/bottom
     // so that next call to make_perimeters() performs a union() before computing loops
     bool                    				m_typed_slices = false;
+    // Purge growth edits untyped slices too, even when canceled before infill.
+    bool                                    m_purge_extra_perimeters = false;
 
     FillAdaptive::RegionOctrees             m_adaptive_fill_octrees;
     std::vector<BoundingBox>                m_separated_body_bboxes;

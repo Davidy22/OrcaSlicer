@@ -2037,6 +2037,12 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
 
     // Belt printer validation: incompatible features.
     if (m_config.belt_printer.value) {
+        // The active belt planner routes prism fills instead of inner walls.
+        // Match its activation predicate, including whether a prism exists.
+        if (m_config.purge_into_inner_walls && this->has_belt_purge_tower()) {
+            return { L("Purge into inner walls and the belt purge tower cannot be enabled together. Disable one of them."),
+                     nullptr, "purge_into_inner_walls" };
+        }
         for (const PrintObject *object : m_objects) {
             if (object->config().raft_layers > 0)
                 return { L("Raft is not compatible with belt printer mode.") };
@@ -6875,6 +6881,11 @@ int Print::export_cached_data(const std::string& directory, bool with_space)
 
 int Print::load_cached_data(const std::string& directory)
 {
+    // Geometry caches omit purge wall tags and native support-growth snapshots.
+    // Decline before touching layers so callers fall back to normal slicing.
+    if (m_config.purge_into_inner_walls.getBool())
+        return CLI_IMPORT_CACHE_DATA_CAN_NOT_USE;
+
     int ret = 0;
     boost::filesystem::path directory_path(directory);
 

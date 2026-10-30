@@ -5,6 +5,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "test_helpers.hpp"
+#include "test_utils.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -20,11 +21,13 @@
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Utils.hpp"
 #include "libslic3r/libslic3r.h"
 
 #include <algorithm>
 #include <cstddef>
 #include <cmath>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <set>
@@ -245,6 +248,166 @@ TEST_CASE("Purge demand and target changes invalidate model walls only where nee
     for (const PrintObject *object : print.objects())
         CHECK(object->is_step_done(posPerimeters) == !regenerate_walls);
     CHECK_FALSE(print.is_step_done(psWipeTower));
+}
+
+TEST_CASE("Purge wall replanning discards growth from incomplete perimeter passes", "[PurgeIntoInnerWalls][Regression]")
+{
+    const char *generator = GENERATE("classic", "arachne");
+    const bool complete = GENERATE(false, true);
+    const std::string change = GENERATE("demand", "preference", "disable");
+    CAPTURE(generator, complete, change);
+    Model model;
+    Print print;
+    DynamicPrintConfig config = purge_config(generator, 1);
+    config.set_deserialize_strict({{"prime_volume", 1000.}});
+    config.set_key_value("slicing_pipeline_plugin", new ConfigOptionStrings({"probe"}));
+    init_purge_print(print, model, config);
+    if (complete)
+        print.process();
+    else {
+        // Use the existing pipeline seam to cancel after every object's
+        // perimeters, but before infill can type the slices.
+        {
+            Print::set_slicing_pipeline_hook_fn([&](Print &active, const PrintObject *object, SlicingPipelineStepPlugin step) {
+                if (step == SlicingPipelineStepPlugin::posPerimeters && object == print.objects().back())
+                    active.cancel();
+            });
+            const ScopeGuard reset_hook([] { Print::set_slicing_pipeline_hook_fn(nullptr); });
+            REQUIRE_THROWS_AS(print.process(), CanceledException);
+        }
+        for (const PrintObject *object : print.objects()) {
+            REQUIRE(object->is_step_done(posPerimeters));
+            REQUIRE_FALSE(object->is_step_done(posPrepareInfill));
+        }
+        print.restart();
+    }
+    size_t generated = 0;
+    for (const PrintObject *object : print.objects())
+        for (const Layer *layer : object->layers())
+            for (const LayerRegion *region : layer->regions())
+                for_each_extrusion_leaf(region->perimeters, [&](const ExtrusionEntity &entity) {
+                    if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity))
+                        generated += loop->generated_for_purge;
+                });
+    REQUIRE(generated > 0);
+
+    if (change == "preference")
+        model.objects.back()->config.set_key_value("purge_into_inner_walls_preferred", new ConfigOptionBool(true));
+    else if (change == "disable")
+        config.set_deserialize_strict({{"purge_into_inner_walls", false}});
+    else
+        config.set_deserialize_strict({{"prime_volume", 0.}});
+    print.apply(model, config);
+    print.process();
+    for (const PrintObject *object : print.objects()) {
+        // With no demand (or purge off), neither object needs extra walls.
+        // With a preferred object, only it should continue growing walls.
+        const bool preferred = change == "preference" && object->config().purge_into_inner_walls_preferred.getBool();
+        size_t loops = 0, grown = 0;
+        for (const Layer *layer : object->layers())
+            for (const LayerRegion *region : layer->regions())
+                for_each_extrusion_leaf(region->perimeters, [&](const ExtrusionEntity &entity) {
+                    if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity)) {
+                        ++loops;
+                        grown += loop->generated_for_purge;
+                        if (!preferred) {
+                            CHECK(loop->inset_idx == 0); // the configured single native wall
+                            CHECK_FALSE(loop->generated_for_purge);
+                        }
+                    }
+                });
+        REQUIRE(loops > 0);
+        if (preferred)
+            REQUIRE(grown > 0);
+    }
+}
+
+TEST_CASE("Shared model copies size purge walls like print instances", "[PurgeIntoInnerWalls][Regression]")
+{
+    std::vector<size_t> instance_loops;
+    for (const bool shared : {false, true}) {
+        CAPTURE(shared);
+        Model model;
+        Print print;
+        DynamicPrintConfig config = purge_config("classic", 3);
+        config.set_deserialize_strict({{"prime_volume", 18.}, {"line_width", 0.45},
+            {"outer_wall_line_width", 0.45}, {"inner_wall_line_width", 0.45}, {"initial_layer_line_width", 0.45}});
+        init_purge_print(print, model, config);
+        ModelObject *first = model.objects.front();
+        ModelInstance *copy = shared ? model.add_object(*first)->instances.front() : first->add_instance(*first->instances.front());
+        copy->set_offset(copy->get_offset() + Vec3d(0., 30., 0.));
+        print.apply(model, config);
+        print.process();
+        if (shared)
+            REQUIRE(print.objects().back()->get_shared_object() == print.objects().front());
+        const PrintObject *source = print.objects().front();
+        std::vector<size_t> loops;
+        for (const Layer *layer : source->layers()) {
+            size_t count = 0;
+            for (const LayerRegion *region : layer->regions())
+                for_each_extrusion_leaf(region->perimeters, [&](const ExtrusionEntity &entity) {
+                    if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity)) {
+                        ++count;
+                        // The two copies' native inner walls already fit this
+                        // demand; sharing must not manufacture extra walls.
+                        CHECK_FALSE(loop->generated_for_purge);
+                    }
+                });
+            REQUIRE(count > 0);
+            loops.push_back(count);
+        }
+        REQUIRE_FALSE(loops.empty());
+        if (shared)
+            CHECK(loops == instance_loops);
+        else
+            instance_loops = std::move(loops);
+    }
+}
+
+TEST_CASE("Inner-wall purge rejects only active competing belt purge planners", "[PurgeIntoInnerWalls][Regression]")
+{
+    const bool belt = GENERATE(false, true);
+    const bool tower = GENERATE(false, true);
+    const bool purge = GENERATE(false, true);
+    const bool prism = GENERATE(false, true);
+    CAPTURE(belt, tower, purge, prism);
+    Model model;
+    Print print;
+    DynamicPrintConfig config = purge_config("classic", 3);
+    config.set_deserialize_strict({{"belt_printer", belt}, {"enable_belt_purge_tower", tower}, {"purge_into_inner_walls", purge}});
+    init_purge_print(print, model, config);
+    model.objects.front()->config.set_key_value("belt_purge_tower_object", new ConfigOptionBool(prism));
+    print.apply(model, config);
+    const StringObjectException validation = print.validate();
+    const bool conflict = belt && tower && purge && prism;
+    INFO(validation.string);
+    if (conflict) {
+        CHECK_FALSE(validation.string.empty());
+        CHECK(validation.opt_key == "purge_into_inner_walls");
+    } else
+        CHECK(validation.string.empty());
+}
+
+TEST_CASE("Inner-wall purge declines geometry caches before changing generated layers", "[PurgeIntoInnerWalls][Regression]")
+{
+    Model model;
+    Print print;
+    const DynamicPrintConfig config = purge_config("classic", 1);
+    init_purge_print(print, model, config);
+    print.process();
+    ScopedTemporaryDir cache("purge-wall-cache");
+    REQUIRE(print.export_cached_data(cache.string()) == 0);
+    const PrintObject *object = print.objects().front();
+    const size_t layers = object->layer_count();
+    REQUIRE(layers > 0);
+    const Layer *first_layer = object->get_layer(0);
+    // Loading geometry alone loses purge tags and native support snapshots.
+    // A failed import must leave the live slicing state untouched so the
+    // caller can use its existing fallback to normal slicing.
+    CHECK(print.load_cached_data(cache.string()) == CLI_IMPORT_CACHE_DATA_CAN_NOT_USE);
+    CHECK(object->layer_count() == layers);
+    CHECK(object->get_layer(0) == first_layer);
+    CHECK(object->is_step_done(posPerimeters));
 }
 
 TEST_CASE("Inner-wall purge warns only for a measured shortfall without a print-time dialog", "[PurgeIntoInnerWalls][Regression]")
