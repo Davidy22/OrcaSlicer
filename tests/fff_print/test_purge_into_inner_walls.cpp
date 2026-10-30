@@ -219,7 +219,9 @@ TEST_CASE("Purge overrides and emitted colors are restricted to inner walls", "[
 TEST_CASE("Purge demand and target changes invalidate model walls only where needed", "[PurgeIntoInnerWalls][Regression]")
 {
     const std::string key = GENERATE("purge_into_inner_walls_preferred", "prime_volume", "flush_volumes_matrix",
-                                     "flush_multiplier", "purge_in_prime_tower", "single_extruder_multi_material");
+        "flush_multiplier", "purge_in_prime_tower", "single_extruder_multi_material", "print_sequence",
+        "filament_soluble", "filament_is_support", "sparse_infill_filament_id", "internal_solid_filament_id",
+        "top_surface_filament_id", "bottom_surface_filament_id");
     const bool enabled = GENERATE(false, true);
     CAPTURE(key, enabled);
     Model model;
@@ -241,6 +243,13 @@ TEST_CASE("Purge demand and target changes invalidate model walls only where nee
         config.option<ConfigOptionFloats>(key)->values = {0., 20., 20., 0.};
     else if (key == "flush_multiplier")
         config.option<ConfigOptionFloats>(key)->values = {2.};
+    else if (key == "print_sequence")
+        config.set_deserialize_strict(key, "by object");
+    else if (key == "filament_soluble" || key == "filament_is_support")
+        config.option<ConfigOptionBools>(key)->values = {false, true};
+    else if (key.find("_filament_id") != std::string::npos)
+        // Only one object's infill changes, but every donor's demand can change.
+        model.objects.front()->config.set_key_value(key, new ConfigOptionInt(2));
     else
         config.set_deserialize_strict({{key, !config.option<ConfigOptionBool>(key)->value}});
     print.apply(model, config);
@@ -250,11 +259,121 @@ TEST_CASE("Purge demand and target changes invalidate model walls only where nee
     CHECK_FALSE(print.is_step_done(psWipeTower));
 }
 
-TEST_CASE("Purge wall replanning discards growth from incomplete perimeter passes", "[PurgeIntoInnerWalls][Regression]")
+TEST_CASE("Incremental purge wall layouts match fresh prints after shared demand changes", "[PurgeIntoInnerWalls][Regression]")
+{
+    const char *generator = GENERATE("classic", "arachne");
+    const bool enabled = GENERATE(false, true);
+    const std::string change = GENERATE("add copy", "remove copy", "source color", "remove source",
+                                       "remove preferred", "export only", "move copy");
+    CAPTURE(generator, enabled, change);
+    Model model;
+    Print print;
+    auto config = purge_config(generator, 1, false, 3);
+    config.set_deserialize_strict({{"purge_into_inner_walls", enabled}, {"prime_volume", 18.}});
+    init_purge_print(print, model, config, change != "remove preferred", change == "remove copy" ? 2 : 1);
+    if (change == "remove preferred") {
+        // Removing the only preferred target must activate growth on both
+        // survivors, not leave their cached single-wall geometry unchanged.
+        ModelObject *preferred = model.add_object(*model.objects.back());
+        preferred->config.set_key_value("extruder", new ConfigOptionInt(3));
+        preferred->config.set_key_value("purge_into_inner_walls_preferred", new ConfigOptionBool(true));
+        preferred->instances.front()->set_offset(preferred->instances.front()->get_offset() + Vec3d(0., 30., 0.));
+        print.apply(model, config);
+    }
+    print.process();
+    const auto perimeter_timestamp = print.objects().front()->step_state_with_timestamp(posPerimeters).timestamp;
+    if (change == "add copy") {
+        ModelObject *target = model.objects.front();
+        ModelInstance *copy = target->add_instance(*target->instances.front());
+        copy->set_offset(copy->get_offset() + Vec3d(0., 30., 0.));
+    } else if (change == "remove copy")
+        model.objects.front()->delete_instance(1);
+    else if (change == "source color")
+        model.objects.back()->config.set_key_value("extruder", new ConfigOptionInt(1));
+    else if (change == "remove source" || change == "remove preferred")
+        model.delete_object(model.objects.size() - 1);
+    else if (change == "export only")
+        config.option<ConfigOptionStrings>("filament_notes")->values.front() = "export-only change";
+    else {
+        ModelInstance *copy = model.objects.front()->instances.front();
+        copy->set_offset(copy->get_offset() + Vec3d(0., 30., 0.));
+    }
+    print.apply(model, config);
+    const bool changes_demand = change != "export only" && change != "move copy";
+    const bool regenerate_walls = enabled && changes_demand;
+    // This donor is untouched when a different source changes or disappears.
+    CHECK(print.objects().front()->is_step_done(posPerimeters) == !regenerate_walls);
+    print.process();
+    if (!changes_demand)
+        CHECK(print.objects().front()->step_state_with_timestamp(posPerimeters).timestamp == perimeter_timestamp);
+
+    Print fresh;
+    fresh.apply(model, config);
+    fresh.process();
+    const auto layout = [](const Print &active) {
+        std::vector<std::pair<size_t, double>> result;
+        for (const PrintObject *object : active.objects())
+            for (const Layer *layer : object->layers()) {
+                size_t loops = 0;
+                double volume = 0.;
+                for (const LayerRegion *region : layer->regions()) {
+                    volume += region->perimeters.total_volume();
+                    for_each_extrusion_leaf(region->perimeters, [&](const ExtrusionEntity &entity) { loops += entity.is_loop(); });
+                }
+                result.emplace_back(loops, volume);
+            }
+        return result;
+    };
+    const auto incremental = layout(print), expected = layout(fresh);
+    REQUIRE_FALSE(expected.empty());
+    REQUIRE(incremental.size() == expected.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        CAPTURE(i);
+        CHECK(incremental[i].first == expected[i].first);
+        CHECK_THAT(incremental[i].second, Catch::Matchers::WithinAbs(expected[i].second, 1e-5));
+    }
+}
+
+TEST_CASE("Blocked material transitions do not grow unused model walls", "[PurgeIntoInnerWalls][Regression]")
+{
+    const char *generator = GENERATE("classic", "arachne");
+    const std::string material = GENERATE("filament_soluble", "filament_is_support");
+    const size_t protected_filament = GENERATE(size_t{0}, size_t{1});
+    CAPTURE(generator, material, protected_filament);
+    Model model;
+    Print print;
+    auto config = purge_config(generator, 1);
+    config.set_deserialize_strict({{"prime_volume", 1000.}});
+    init_purge_print(print, model, config);
+    print.process();
+    const auto grown_loops = [](const Print &active) {
+        size_t count = 0;
+        for (const PrintObject *object : active.objects())
+            for (const Layer *layer : object->layers())
+                for (const LayerRegion *region : layer->regions())
+                    for_each_extrusion_leaf(region->perimeters, [&](const ExtrusionEntity &entity) {
+                        if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity))
+                            count += loop->generated_for_purge;
+                    });
+        return count;
+    };
+    REQUIRE(grown_loops(print) > 0); // prove the unprotected control needs growth
+    config.option<ConfigOptionBools>(material)->values[protected_filament] = true;
+    print.apply(model, config);
+    print.process();
+    // Both directions now involve protected material: neither has usable demand.
+    CHECK(grown_loops(print) == 0);
+    for (const LayerTools &tools : print.tool_ordering())
+        CHECK_FALSE(tools.wiping_extrusions().is_anything_overridden());
+}
+
+TEST_CASE("Purge wall replanning restores changed inputs and preserves unrelated work", "[PurgeIntoInnerWalls][Regression]")
 {
     const char *generator = GENERATE("classic", "arachne");
     const bool complete = GENERATE(false, true);
-    const std::string change = GENERATE("demand", "preference", "disable");
+    const std::string change = GENERATE("demand", "preference", "disable", "unchanged", "export", "copy source");
+    const bool reuse_perimeters = change == "unchanged" || change == "export";
+    const bool stop_after_first = reuse_perimeters || change == "copy source";
     CAPTURE(generator, complete, change);
     Model model;
     Print print;
@@ -265,18 +384,21 @@ TEST_CASE("Purge wall replanning discards growth from incomplete perimeter passe
     if (complete)
         print.process();
     else {
-        // Use the existing pipeline seam to cancel after every object's
-        // perimeters, but before infill can type the slices.
+        // Stop before infill types the slices. Keep the second object's walls
+        // pending for edits that must either reuse the first object's work or
+        // stop readers of the second object's still-invalid inputs.
         {
             Print::set_slicing_pipeline_hook_fn([&](Print &active, const PrintObject *object, SlicingPipelineStepPlugin step) {
-                if (step == SlicingPipelineStepPlugin::posPerimeters && object == print.objects().back())
+                const PrintObject *last = stop_after_first ? print.objects().front() : print.objects().back();
+                if (step == SlicingPipelineStepPlugin::posPerimeters && object == last)
                     active.cancel();
             });
             const ScopeGuard reset_hook([] { Print::set_slicing_pipeline_hook_fn(nullptr); });
             REQUIRE_THROWS_AS(print.process(), CanceledException);
         }
         for (const PrintObject *object : print.objects()) {
-            REQUIRE(object->is_step_done(posPerimeters));
+            const bool done = !stop_after_first || object == print.objects().front();
+            REQUIRE(object->is_step_done(posPerimeters) == done);
             REQUIRE_FALSE(object->is_step_done(posPrepareInfill));
         }
         print.restart();
@@ -291,18 +413,42 @@ TEST_CASE("Purge wall replanning discards growth from incomplete perimeter passe
                 });
     REQUIRE(generated > 0);
 
+    const auto perimeter_timestamp = print.objects().front()->step_state_with_timestamp(posPerimeters).timestamp;
     if (change == "preference")
         model.objects.back()->config.set_key_value("purge_into_inner_walls_preferred", new ConfigOptionBool(true));
     else if (change == "disable")
         config.set_deserialize_strict({{"purge_into_inner_walls", false}});
-    else
+    else if (change == "demand")
         config.set_deserialize_strict({{"prime_volume", 0.}});
-    print.apply(model, config);
+    else if (change == "export")
+        config.option<ConfigOptionStrings>("filament_notes")->values.front() = "export-only change";
+    if (change == "copy source") {
+        ModelObject *source = model.objects.back();
+        ModelInstance *copy = source->add_instance(*source->instances.front());
+        copy->set_offset(copy->get_offset() + Vec3d(0., 30., 0.));
+        size_t copies_at_first_stop = 0;
+        print.set_cancel_callback([&] {
+            if (copies_at_first_stop == 0)
+                copies_at_first_stop = print.objects().back()->instances().size();
+        });
+        const ScopeGuard reset_callback([&] { print.set_cancel_callback([] {}); });
+        print.apply(model, config);
+        // With an incomplete pass the source's own steps are already invalid.
+        // A cached/active donor still needs stopping BEFORE its inputs change.
+        CHECK(copies_at_first_stop == 1);
+    } else
+        print.apply(model, config);
+    if (reuse_perimeters)
+        CHECK(print.objects().front()->is_step_done(posPerimeters));
     print.process();
+    if (reuse_perimeters)
+        CHECK(print.objects().front()->step_state_with_timestamp(posPerimeters).timestamp == perimeter_timestamp);
     for (const PrintObject *object : print.objects()) {
-        // With no demand (or purge off), neither object needs extra walls.
-        // With a preferred object, only it should continue growing walls.
-        const bool preferred = change == "preference" && object->config().purge_into_inner_walls_preferred.getBool();
+        // Only preference changes restrict growth to one object. Removing
+        // demand or disabling purge clears growth altogether; irrelevant edits
+        // preserve completed walls rather than regenerating either object.
+        const bool should_grow = reuse_perimeters || change == "copy source" ||
+            (change == "preference" && object->config().purge_into_inner_walls_preferred.getBool());
         size_t loops = 0, grown = 0;
         for (const Layer *layer : object->layers())
             for (const LayerRegion *region : layer->regions())
@@ -310,14 +456,14 @@ TEST_CASE("Purge wall replanning discards growth from incomplete perimeter passe
                     if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity)) {
                         ++loops;
                         grown += loop->generated_for_purge;
-                        if (!preferred) {
+                        if (!should_grow) {
                             CHECK(loop->inset_idx == 0); // the configured single native wall
                             CHECK_FALSE(loop->generated_for_purge);
                         }
                     }
                 });
         REQUIRE(loops > 0);
-        if (preferred)
+        if (should_grow)
             REQUIRE(grown > 0);
     }
 }

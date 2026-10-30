@@ -15,6 +15,7 @@
 #include "ClipperUtils.hpp"
 #include "ConnectedBodies.hpp"
 #include "Geometry.hpp"
+#include "GCode/ToolOrdering.hpp"
 #include "I18N.hpp"
 #include "Layer.hpp"
 #include "MutablePolygon.hpp"
@@ -185,6 +186,9 @@ PrintBase::ApplyStatus PrintObject::set_instances(PrintInstances &&instances)
         status = PrintBase::APPLY_STATUS_CHANGED;
         if (m_print->invalidate_steps({ psSkirtBrim, psGCodeExport }) ||
             (! equal_length && m_print->invalidate_step(psWipeTower)))
+            status = PrintBase::APPLY_STATUS_INVALIDATED;
+        // Purge-grown walls depend on the capacity of all physical copies.
+        if (!equal_length && m_print->config().purge_into_inner_walls && this->invalidate_step(posPerimeters))
             status = PrintBase::APPLY_STATUS_INVALIDATED;
         m_instances = std::move(instances);
 	    for (PrintInstance &i : m_instances)
@@ -687,7 +691,8 @@ void PrintObject::make_perimeters()
                         if (object->config().purge_into_inner_walls_preferred.getBool() || !any_preferred)
                             ++preferred_count;
                         for (const unsigned int filament : layer_filaments(layer)) {
-                            if (prev_filament >= 0 && (int) filament != prev_filament) {
+                            if (prev_filament >= 0 && (int) filament != prev_filament
+                                && WipingExtrusions::can_purge(purge_cfg, (unsigned int) prev_filament, filament)) {
                                 const float volume = estimate_flush_volume(purge_cfg, (unsigned int) prev_filament, filament);
                                 layer_demand += volume;
                                 demand_by_filament[layer_idx][filament] += volume;
@@ -1645,6 +1650,12 @@ bool PrintObject::invalidate_state_by_config_options(
     std::vector<PrintObjectStep> steps;
     bool invalidated = false;
     for (const t_config_option_key &opt_key : opt_keys) {
+        // These colors also enter the pre-infill estimate used to grow purge walls.
+        if (m_print->config().purge_into_inner_walls &&
+            (opt_key == "sparse_infill_filament_id" || opt_key == "internal_solid_filament_id" ||
+             opt_key == "top_surface_filament_id" || opt_key == "bottom_surface_filament_id"))
+            steps.emplace_back(posPerimeters);
+
         if (   opt_key == "brim_width"
             || opt_key == "leading_brim_length"
             || opt_key == "extra_brim_width"
@@ -2065,7 +2076,10 @@ bool PrintObject::invalidate_state_by_config_options(
 
 bool PrintObject::invalidate_step(PrintObjectStep step)
 {
-	bool invalidated = Inherited::invalidate_step(step);
+    bool invalidated = false;
+    if (step == posSlice || step == posPerimeters)
+        invalidated = m_print->invalidate_purge_wall_demand();
+    invalidated |= Inherited::invalidate_step(step);
 
     // propagate to dependent steps
     if (step == posPerimeters) {
@@ -2110,10 +2124,11 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
 
 bool PrintObject::invalidate_all_steps()
 {
+    const bool purge_invalidated = m_print->invalidate_purge_wall_demand();
 	// First call the "invalidate" functions, which may cancel background processing.
     const bool inherited_invalidated = Inherited::invalidate_all_steps();
     const bool print_invalidated     = m_print->invalidate_all_steps();
-    bool result = inherited_invalidated || print_invalidated;
+    bool result = purge_invalidated || inherited_invalidated || print_invalidated;
 	// Then reset some of the depending values.
 	m_slicing_params.valid = false;
 	m_belt_floor_z_shift_cache_valid = false;

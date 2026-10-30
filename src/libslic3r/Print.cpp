@@ -347,7 +347,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         // Leave the legacy invalidation paths unchanged when the feature is off.
         if (m_config.purge_into_inner_walls &&
             (opt_key == "prime_volume" || opt_key == "flush_volumes_matrix" || opt_key == "flush_multiplier" ||
-             opt_key == "purge_in_prime_tower" || opt_key == "single_extruder_multi_material"))
+             opt_key == "purge_in_prime_tower" || opt_key == "single_extruder_multi_material" || opt_key == "print_sequence" ||
+             opt_key == "filament_soluble" || opt_key == "filament_is_support"))
             osteps.emplace_back(posPerimeters);
 
         if (steps_gcode.find(opt_key) != steps_gcode.end()) {
@@ -569,6 +570,18 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
 void Print::set_calib_params(const Calib_Params& params) {
     m_calib_params = params;
     m_calib_params.mode = params.mode;
+}
+
+bool Print::invalidate_purge_wall_demand()
+{
+    if (m_config.purge_into_inner_walls && !m_purge_perimeters_invalidated) {
+        m_purge_perimeters_invalidated = true;
+        // A donor may be reading another object's inputs even while that
+        // object's own steps are already invalid. Stop before those inputs change.
+        this->call_cancel_callback();
+        return true;
+    }
+    return false;
 }
 
 bool Print::invalidate_step(PrintStep step)
