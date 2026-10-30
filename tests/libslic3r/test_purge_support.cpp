@@ -1,4 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_message.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -91,22 +93,36 @@ TEST_CASE("Support wall growth replaces infill instead of overprinting it", "[Pu
     CHECK(remaining_infill > 0.);
 }
 
-TEST_CASE("Support purge walls grow beyond two loops and stop at solid geometry", "[PurgeSupport][PurgeIntoInnerWalls]")
+TEST_CASE("Support walls extend to solid capacity and restore their native paths", "[PurgeSupport][PurgeIntoInnerWalls][Regression]")
 {
+    const size_t base_walls = GENERATE(size_t{0}, size_t{2});
+    CAPTURE(base_walls);
     const Flow flow(0.45f, 0.2f, 0.4f);
-    ExtrusionEntityCollection paths = sparse_support(flow);
-    const double before = paths.total_volume();
-    SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow, 2);
-    const double added = region.grow(10000.);
-    REQUIRE(support_loop_count(paths) > 2);
-    CHECK(added > 0.);
-    CHECK_THAT(paths.total_volume() - before, WithinAbs(added, 1e-6));
-    // Geometry, not the UI's two-loop maximum, bounds the runtime count.
-    CHECK(support_loop_count(paths) < size_t(scale_(20.) / flow.scaled_spacing()));
-    CHECK(paths.total_volume() < 20. * 20. * flow.height() * 1.1);
+    size_t clones = 0;
+    ExtrusionEntityCollection paths = sparse_support(flow, &clones);
+    const ExtrusionEntitiesPtr native_paths = paths.entities;
+    const double native_volume = paths.total_volume();
+    SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow, base_walls);
+    const double first = region.grow(1.);
+    REQUIRE(first > 0.);
+    const double remaining = region.grow(10000.);
+    REQUIRE(remaining > 0.);
     const size_t count = support_loop_count(paths);
+    CHECK(count > 2);
+    CHECK_THAT(paths.total_volume(), WithinAbs(native_volume + first + remaining, 1e-6));
+    // Geometry, not the UI's two-loop maximum, bounds the runtime count.
+    CHECK(count < size_t(scale_(20.) / flow.scaled_spacing()));
+    CHECK(paths.total_volume() < 20. * 20. * flow.height() * 1.1);
     CHECK_THAT(region.grow(10000.), WithinAbs(0., 1e-6));
     CHECK(support_loop_count(paths) == count);
+    CHECK(clones == 0);
+
+    region.reset();
+    CHECK(paths.entities == native_paths);
+    CHECK_THAT(paths.total_volume(), WithinAbs(native_volume, 1e-6));
+    CHECK_THAT(region.grow(10000.), WithinAbs(first + remaining, 1e-6));
+    CHECK(support_loop_count(paths) == count);
+    CHECK(clones == 0);
 }
 
 TEST_CASE("Support growth respects holes and retains paths outside its safe region", "[PurgeSupport][PurgeIntoInnerWalls]")
@@ -134,26 +150,6 @@ TEST_CASE("Support growth respects holes and retains paths outside its safe regi
         }
     });
     CHECK(preserved == 1);
-}
-
-TEST_CASE("Replanning support purge restores native paths and does not accumulate loops", "[PurgeSupport][PurgeIntoInnerWalls]")
-{
-    const Flow flow(0.45f, 0.2f, 0.4f);
-    ExtrusionEntityCollection paths = sparse_support(flow);
-    const double native_volume = paths.total_volume();
-    const size_t native_count = paths.entities.size();
-    SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow, 1);
-    REQUIRE(region.grow(10000.) > 0.);
-    REQUIRE(support_loop_count(paths) > 2);
-    region.reset();
-    CHECK(support_loop_count(paths) == 0);
-    CHECK(paths.entities.size() == native_count);
-    CHECK_THAT(paths.total_volume(), WithinAbs(native_volume, 1e-6));
-    const double first = region.grow(1.);
-    const size_t first_count = support_loop_count(paths);
-    region.reset();
-    CHECK_THAT(region.grow(1.), WithinAbs(first, 1e-6));
-    CHECK(support_loop_count(paths) == first_count);
 }
 
 TEST_CASE("Support leaf traversal preserves loop units and nested entity identities", "[PurgeSupport]")
@@ -188,47 +184,36 @@ TEST_CASE("Support regions that cannot grow do not copy native paths", "[PurgeSu
     CHECK(clones == 0);
 }
 
-TEST_CASE("Support replanning transfers its saved native paths instead of copying them", "[PurgeSupport][Regression][Memory]")
+TEST_CASE("Support replanning restores repeatable growth without copying native paths", "[PurgeSupport][PurgeIntoInnerWalls][Regression][Memory]")
 {
     const Flow flow(0.45f, 0.2f, 0.4f);
     size_t clones = 0;
     ExtrusionEntityCollection paths = sparse_support(flow, &clones);
     const double native_volume = paths.total_volume();
-    const size_t native_count = paths.entities.size();
     const ExtrusionEntitiesPtr native_paths = paths.entities;
     SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow, 1);
+    double low_demand_volume = 0.;
+    size_t low_demand_loops = 0;
     for (size_t iteration = 0; iteration < 16; ++iteration) {
-        REQUIRE(region.grow(iteration % 2 == 0 ? 1. : 10000.) > 0.);
+        CAPTURE(iteration);
+        const double added = region.grow(iteration % 2 == 0 ? 1. : 10000.);
+        REQUIRE(added > 0.);
+        if (iteration == 0) {
+            low_demand_volume = added;
+            low_demand_loops = support_loop_count(paths);
+        } else if (iteration % 2 == 0) {
+            CHECK_THAT(added, WithinAbs(low_demand_volume, 1e-6));
+            CHECK(support_loop_count(paths) == low_demand_loops);
+        } else
+            CHECK(support_loop_count(paths) > 2);
         CHECK(clones == 0);
-        const size_t saved_clones = clones;
         region.reset();
-        CHECK(clones == saved_clones);
+        CHECK(clones == 0);
         CHECK(paths.entities == native_paths);
-        CHECK(paths.entities.size() == native_count);
+        CHECK(support_loop_count(paths) == 0);
         CHECK_THAT(paths.total_volume(), WithinAbs(native_volume, 1e-6));
         region.reset();
-        CHECK(clones == saved_clones);
+        CHECK(paths.entities == native_paths);
+        CHECK(clones == 0);
     }
-}
-
-TEST_CASE("Extending grown support restores its original native paths", "[PurgeSupport][PurgeIntoInnerWalls][Regression]")
-{
-    const Flow flow(0.45f, 0.2f, 0.4f);
-    size_t clones = 0;
-    ExtrusionEntityCollection paths = sparse_support(flow, &clones);
-    const ExtrusionEntitiesPtr native_paths = paths.entities;
-    const double native_volume = paths.total_volume();
-    SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow, 0);
-    const double first = region.grow(1.);
-    REQUIRE(first > 0.);
-    const double remaining = region.grow(10000.);
-    REQUIRE(remaining > 0.);
-    CHECK(support_loop_count(paths) > 2);
-    CHECK_THAT(paths.total_volume(), WithinAbs(native_volume + first + remaining, 1e-6));
-    CHECK(clones == 0);
-    region.reset();
-    CHECK(paths.entities == native_paths);
-    CHECK_THAT(paths.total_volume(), WithinAbs(native_volume, 1e-6));
-    CHECK_THAT(region.grow(10000.), WithinAbs(first + remaining, 1e-6));
-    CHECK(clones == 0);
 }

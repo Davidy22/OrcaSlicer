@@ -230,28 +230,6 @@ TEST_CASE("Supports absorb residual purge after model walls and grow past two lo
     CHECK(grown_regions > 0);
 }
 
-TEST_CASE("Sufficient model walls leave native support paths unchanged", "[PurgeSupport][PurgeIntoInnerWalls]")
-{
-    Model model;
-    Print print;
-    const auto config = support_purge_config("normal", 0.01);
-    init_support_purge(print, model, config);
-    print.process();
-    CHECK(support_overrides(print) == 0);
-    size_t support_regions = 0;
-    for (const PrintObject *object : print.objects())
-        for (SupportLayer *support : object->support_layers())
-            for (auto &region : support->purge_support_regions) {
-                ++support_regions;
-                const double native_volume = region.collection()->total_volume();
-                const ExtrusionEntitiesPtr native_paths = region.collection()->entities;
-                region.reset();
-                CHECK(region.collection()->entities == native_paths);
-                CHECK_THAT(region.collection()->total_volume(), WithinAbs(native_volume, 1e-6));
-            }
-    REQUIRE(support_regions > 0);
-}
-
 TEST_CASE("Soluble and dedicated support interfaces keep their native filament", "[PurgeSupport][PurgeIntoInnerWalls][Regression]")
 {
     const bool soluble = GENERATE(false, true);
@@ -282,12 +260,32 @@ TEST_CASE("Soluble and dedicated support interfaces keep their native filament",
     check_support_export(print);
 }
 
-TEST_CASE("Replanning removes unneeded support growth and disabling purge regenerates native supports", "[PurgeSupport][PurgeIntoInnerWalls][Regression]")
+TEST_CASE("Support replanning grows only for residual demand and disabling purge restores native supports", "[PurgeSupport][PurgeIntoInnerWalls][Regression]")
 {
     Model model;
     Print print;
-    auto config = support_purge_config("normal", 60.);
+    auto config = support_purge_config("normal", 0.01);
     init_support_purge(print, model, config);
+    const auto check_native_supports = [&] {
+        CHECK(support_overrides(print) == 0);
+        size_t support_regions = 0;
+        for (const PrintObject *object : print.objects())
+            for (SupportLayer *support : object->support_layers())
+                for (auto &region : support->purge_support_regions) {
+                    ++support_regions;
+                    const double native_volume = region.collection()->total_volume();
+                    const ExtrusionEntitiesPtr native_paths = region.collection()->entities;
+                    region.reset();
+                    CHECK(region.collection()->entities == native_paths);
+                    CHECK_THAT(region.collection()->total_volume(), WithinAbs(native_volume, 1e-6));
+                }
+        REQUIRE(support_regions > 0);
+    };
+    print.process();
+    check_native_supports();
+
+    config.set_deserialize_strict({{"prime_volume", 60.}});
+    print.apply(model, config);
     print.process();
     REQUIRE(support_overrides(print) > 0);
     const double grown_volume = support_volume(print);
@@ -297,15 +295,8 @@ TEST_CASE("Replanning removes unneeded support growth and disabling purge regene
     for (const PrintObject *object : print.objects())
         CHECK_FALSE(object->is_step_done(posSimplifySupportPath));
     print.process();
-    CHECK(support_overrides(print) == 0);
     CHECK(support_volume(print) < grown_volume);
-    for (const PrintObject *object : print.objects())
-        for (SupportLayer *support : object->support_layers())
-            for (auto &region : support->purge_support_regions) {
-                const double native_volume = region.collection()->total_volume();
-                region.reset();
-                CHECK_THAT(region.collection()->total_volume(), WithinAbs(native_volume, 1e-6));
-            }
+    check_native_supports();
 
     config.set_deserialize_strict({{"purge_into_inner_walls", false}});
     print.apply(model, config);

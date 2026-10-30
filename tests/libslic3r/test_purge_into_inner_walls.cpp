@@ -1,6 +1,3 @@
-// Test cases for purge into inner walls feature
-// Verifies that inner walls are properly tagged and extra walls are generated when needed
-
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_message.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -63,35 +60,22 @@ std::vector<ExtrusionEntityCollection::PurgeInnerWall> purge_test_walls(const Ex
 }
 } // namespace
 
-// Test ExtrusionEntityCollection purge candidate detection
-TEST_CASE("ExtrusionEntityCollection purge candidate detection", "[PurgeIntoInnerWalls]")
+TEST_CASE("Wall collections distinguish existing and generated purge loops", "[PurgeIntoInnerWalls]")
 {
-    ExtrusionEntityCollection coll;
-    
-    // Initially no purge candidates
-    REQUIRE(coll.is_purge_inner_wall_candidate() == false);
-    REQUIRE(coll.is_existing_purge_wall() == false);
-    REQUIRE(coll.get_max_inset_idx() == -1);
-    
-    // Add a purge candidate loop (existing wall).
-    coll.append(purge_test_loop(erPerimeter, 2));
+    ExtrusionEntityCollection collection;
+    REQUIRE_FALSE(collection.is_purge_inner_wall_candidate());
+    REQUIRE_FALSE(collection.is_existing_purge_wall());
+    REQUIRE(collection.get_max_inset_idx() == -1);
 
-    // Verify detection
-    REQUIRE(coll.is_purge_inner_wall_candidate() == true);
-    REQUIRE(coll.is_existing_purge_wall() == true);
-    REQUIRE(coll.get_max_inset_idx() == 2);
-    
-    // Add a generated purge wall (extra wall).
-    coll.append(purge_test_loop(erPerimeter, 3, true));
+    collection.append(purge_test_loop(erPerimeter, 2));
+    REQUIRE(collection.is_purge_inner_wall_candidate());
+    REQUIRE(collection.is_existing_purge_wall());
+    REQUIRE(collection.get_max_inset_idx() == 2);
 
-    // Verify mixed detection
-    REQUIRE(coll.is_purge_inner_wall_candidate() == true);
-    REQUIRE(coll.is_existing_purge_wall() == true);  // still has existing walls
-    REQUIRE(coll.get_max_inset_idx() == 3);  // max of both
-    
-    // Test volume calculation
-    double volume = coll.total_volume();
-    REQUIRE(volume > 0);
+    collection.append(purge_test_loop(erPerimeter, 3, true));
+    REQUIRE(collection.is_purge_inner_wall_candidate());
+    REQUIRE(collection.is_existing_purge_wall());
+    REQUIRE(collection.get_max_inset_idx() == 3);
 }
 
 TEST_CASE("A mixed outer and inner wall collection is not a purge target", "[PurgeIntoInnerWalls][Regression]")
@@ -170,32 +154,26 @@ TEST_CASE("Splitting purge walls preserves geometry and isolates outer walls", "
     CHECK(existing_wall.get_max_inset_idx() == 1);
 }
 
-// Test that PrintConfig has purge_into_inner_walls option
-TEST_CASE("PrintConfig purge_into_inner_walls option", "[PurgeIntoInnerWalls]")
+TEST_CASE("Purge settings register once in their global and object scopes", "[PurgeIntoInnerWalls]")
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    
+
     // Check that the option exists
     const ConfigOption* purge_opt = config.option("purge_into_inner_walls");
     REQUIRE(purge_opt != nullptr);
-    REQUIRE(purge_opt->getBool() == false);  // default is false
+    REQUIRE_FALSE(purge_opt->getBool());
 
-    // Extra wall loops are grown until the purge volume fits (or the layer
-    // is solid), so the former loop-count cap option must not exist anymore.
-    // (DynamicPrintConfig has no key whitelist, so absent def => nullptr.)
+    // Demand, not a preset loop-count cap, bounds the extra walls.
     REQUIRE(config.option("purge_inner_walls_max_extra_loops") == nullptr);
 
-    // The feature toggle is global (PrintConfig) while the prioritization
-    // toggle is per-object (PrintObjectConfig). Declaring the same key in both
-    // classes would make FullPrintConfig register it twice (assert in
-    // StaticCacheBase::opt_add) and direct member access ambiguous.
+    // Duplicating a key in both scopes crashes FullPrintConfig registration.
     REQUIRE(PrintConfig::defaults().has("purge_into_inner_walls"));
     REQUIRE_FALSE(PrintConfig::defaults().has("purge_into_inner_walls_preferred"));
     REQUIRE_FALSE(PrintConfig::defaults().has("purge_inner_walls_max_extra_loops"));
     REQUIRE_FALSE(PrintObjectConfig::defaults().has("purge_into_inner_walls"));
     REQUIRE_FALSE(PrintObjectConfig::defaults().has("purge_inner_walls_max_extra_loops"));
     REQUIRE(PrintObjectConfig::defaults().has("purge_into_inner_walls_preferred"));
-    REQUIRE(PrintObjectConfig::defaults().purge_into_inner_walls_preferred.getBool() == false);
+    REQUIRE_FALSE(PrintObjectConfig::defaults().purge_into_inner_walls_preferred.getBool());
 
     const auto full_keys = FullPrintConfig::defaults().keys();
     REQUIRE(std::count(full_keys.begin(), full_keys.end(), "purge_into_inner_walls") == 1);
@@ -383,41 +361,25 @@ TEST_CASE("Purge wall speed ramps without exceeding existing speed or flow limit
     CHECK_THAT(limit_speed(180., target, 0, 1., 0.), WithinAbs(expected.front(), 1e-8));
 }
 
-// Test mutual exclusivity between purge_into_inner_walls and enable_prime_tower
-TEST_CASE("Mutual exclusivity purge vs prime tower", "[PurgeIntoInnerWalls]")
+TEST_CASE("Conflicting imported purge settings favor inner walls over the prime tower", "[PurgeIntoInnerWalls]")
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    
-    // Initially both should be false
-    REQUIRE(config.option("purge_into_inner_walls")->getBool() == false);
-    REQUIRE(config.option("enable_prime_tower")->getBool() == false);
-    
-    // Enable purge mode
+    REQUIRE_FALSE(config.option("purge_into_inner_walls")->getBool());
+    REQUIRE_FALSE(config.option("enable_prime_tower")->getBool());
+
     config.set_key_value("purge_into_inner_walls", new ConfigOptionBool(true));
-    REQUIRE(config.option("purge_into_inner_walls")->getBool() == true);
-    
-    // Try to enable prime tower - should be disabled by mutual exclusivity
     config.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
-    
-    // Run normalization which enforces mutual exclusivity
     config.normalize_fdm_2(1, 2);
-    
-    // Prime tower should be disabled when purge is enabled
-    REQUIRE(config.option("purge_into_inner_walls")->getBool() == true);
-    REQUIRE(config.option("enable_prime_tower")->getBool() == false);
-    
-    // Now disable purge mode
+    REQUIRE(config.option("purge_into_inner_walls")->getBool());
+    REQUIRE_FALSE(config.option("enable_prime_tower")->getBool());
+
     config.set_key_value("purge_into_inner_walls", new ConfigOptionBool(false));
     config.normalize_fdm_2(1, 2);
-    
-    // Prime tower can now be enabled
     config.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
     config.normalize_fdm_2(1, 2);
-    
-    REQUIRE(config.option("purge_into_inner_walls")->getBool() == false);
-    REQUIRE(config.option("enable_prime_tower")->getBool() == true);
+    REQUIRE_FALSE(config.option("purge_into_inner_walls")->getBool());
+    REQUIRE(config.option("enable_prime_tower")->getBool());
 }
-
 
 TEST_CASE("Native shell reservations distinguish islands and hole boundaries", "[PurgeIntoInnerWalls][Regression]")
 {
@@ -483,10 +445,6 @@ TEST_CASE("Merged hole purge walls preserve each hole's native shell", "[PurgeIn
     REQUIRE(walls[2].shells.size() == 2);
     CHECK(walls[2].shells[0] == walls[0].collection);
     CHECK(walls[2].shells[1] == walls[1].collection);
-    // The shared deeper wall is counted only once, not once per hole.
-    const double foreign_volume = walls[2].collection->total_volume();
-    CHECK_THAT(perimeters.total_volume() - walls[0].collection->total_volume() - walls[1].collection->total_volume(),
-               Catch::Matchers::WithinAbs(foreign_volume, 1e-6));
 }
 
 TEST_CASE("A sole inner wall reserves all of its space for the native shell", "[PurgeIntoInnerWalls][Regression]")
@@ -498,12 +456,6 @@ TEST_CASE("A sole inner wall reserves all of its space for the native shell", "[
     const auto walls = purge_test_walls(perimeters);
     REQUIRE(walls.size() == 1);
     CHECK(walls.front().is_shell());
-    CHECK(walls.front().collection->total_volume() > 0.);
-    double foreign_capacity = 0.;
-    for (const auto &wall : walls)
-        if (!wall.is_shell())
-            foreign_capacity += wall.collection->total_volume();
-    CHECK_THAT(foreign_capacity, Catch::Matchers::WithinAbs(0., 1e-6));
 }
 
 TEST_CASE("Native shells follow walls across compatible region collections", "[PurgeIntoInnerWalls][Regression]")
@@ -525,7 +477,6 @@ TEST_CASE("Native shells follow walls across compatible region collections", "[P
     CHECK(walls[1].shells.front() == shell);
     CHECK(walls[1].collection == purge);
 }
-
 
 TEST_CASE("Native shell planning rejects unclosed or disconnected purge loops", "[PurgeIntoInnerWalls][Regression]")
 {

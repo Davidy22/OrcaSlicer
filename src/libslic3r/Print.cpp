@@ -343,6 +343,13 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
     bool invalidated = false;
 
     for (const t_config_option_key &opt_key : opt_keys) {
+        // Purge demand also determines generated model walls, not just allocation.
+        // Leave the legacy invalidation paths unchanged when the feature is off.
+        if (m_config.purge_into_inner_walls &&
+            (opt_key == "prime_volume" || opt_key == "flush_volumes_matrix" || opt_key == "flush_multiplier" ||
+             opt_key == "purge_in_prime_tower" || opt_key == "single_extruder_multi_material"))
+            osteps.emplace_back(posPerimeters);
+
         if (steps_gcode.find(opt_key) != steps_gcode.end()) {
             // These options only affect G-code export or they are just notes without influence on the generated G-code,
             // so there is nothing to invalidate.

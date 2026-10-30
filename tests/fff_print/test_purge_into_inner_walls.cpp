@@ -213,45 +213,41 @@ TEST_CASE("Purge overrides and emitted colors are restricted to inner walls", "[
         REQUIRE(count > 0);
 }
 
-TEST_CASE("Changing a purge preference invalidates every object's walls", "[PurgeIntoInnerWalls][Regression]")
+TEST_CASE("Purge demand and target changes invalidate model walls only where needed", "[PurgeIntoInnerWalls][Regression]")
 {
+    const std::string key = GENERATE("purge_into_inner_walls_preferred", "prime_volume", "flush_volumes_matrix",
+                                     "flush_multiplier", "purge_in_prime_tower", "single_extruder_multi_material");
+    const bool enabled = GENERATE(false, true);
+    CAPTURE(key, enabled);
     Model model;
     Print print;
-    const DynamicPrintConfig config = purge_config("arachne", 1);
+    DynamicPrintConfig config = purge_config("arachne", 1);
+    config.set_deserialize_strict({{"purge_into_inner_walls", enabled}});
+    config.option<ConfigOptionFloats>("flush_volumes_matrix")->values = {0., 10., 10., 0.};
+    config.option<ConfigOptionFloats>("flush_multiplier")->values = {1.};
     init_purge_print(print, model, config);
     print.process();
     for (const PrintObject *object : print.objects())
         REQUIRE(object->is_step_done(posPerimeters));
 
-    model.objects.front()->config.set_key_value("purge_into_inner_walls_preferred", new ConfigOptionBool(true));
+    if (key == "purge_into_inner_walls_preferred")
+        model.objects.front()->config.set_key_value(key, new ConfigOptionBool(true));
+    else if (key == "prime_volume")
+        config.set_deserialize_strict({{key, 20.}});
+    else if (key == "flush_volumes_matrix")
+        config.option<ConfigOptionFloats>(key)->values = {0., 20., 20., 0.};
+    else if (key == "flush_multiplier")
+        config.option<ConfigOptionFloats>(key)->values = {2.};
+    else
+        config.set_deserialize_strict({{key, !config.option<ConfigOptionBool>(key)->value}});
     print.apply(model, config);
+    const bool regenerate_walls = enabled || key == "purge_into_inner_walls_preferred";
     for (const PrintObject *object : print.objects())
-        CHECK_FALSE(object->is_step_done(posPerimeters));
+        CHECK(object->is_step_done(posPerimeters) == !regenerate_walls);
     CHECK_FALSE(print.is_step_done(psWipeTower));
 }
 
-TEST_CASE("Enabling inner-wall purge does not emit a blanket validation warning", "[PurgeIntoInnerWalls][Regression]")
-{
-    Model model;
-    Print print;
-    DynamicPrintConfig config = purge_config("classic", 3);
-    config.set_deserialize_strict({
-        {"use_relative_e_distances", true},
-        {"layer_change_gcode", "G92 E0\n"},
-    });
-    init_purge_print(print, model, config);
-    REQUIRE(print.objects().size() == 2);
-    std::vector<StringObjectException> warnings;
-    const StringObjectException validation = print.validate(&warnings);
-    INFO(validation.string);
-    REQUIRE(validation.string.empty());
-    for (const StringObjectException& warning : warnings)
-        CHECK(warning.opt_key != "purge_into_inner_walls");
-    // A measured capacity shortfall is still reported by the purge planner
-    // after slicing; opting into the mode alone must not produce a warning.
-}
-
-TEST_CASE("Reduced inner-wall purge stays visible without a print-time dialog", "[PurgeIntoInnerWalls][Regression]")
+TEST_CASE("Inner-wall purge warns only for a measured shortfall without a print-time dialog", "[PurgeIntoInnerWalls][Regression]")
 {
     const char *generator = GENERATE("classic", "arachne");
     const bool shortfall = GENERATE(false, true);
@@ -262,8 +258,17 @@ TEST_CASE("Reduced inner-wall purge stays visible without a print-time dialog", 
     DynamicPrintConfig config = purge_config(generator, 3);
     // The two 20 x 20 x 1 mm cubes cannot absorb 1000 mm³ on one layer,
     // even when filled with walls. A 1 mm³ transition fits their inner walls.
-    config.set_deserialize_strict({{"prime_volume", shortfall ? 1000. : 1.}, {"enable_support", false}});
+    config.set_deserialize_strict({
+        {"prime_volume", shortfall ? 1000. : 1.}, {"enable_support", false},
+        {"use_relative_e_distances", true}, {"layer_change_gcode", "G92 E0\n"},
+    });
     init_purge_print(print, model, config);
+    std::vector<StringObjectException> warnings;
+    const StringObjectException validation = print.validate(&warnings);
+    INFO(validation.string);
+    REQUIRE(validation.string.empty());
+    for (const StringObjectException &warning : warnings)
+        CHECK(warning.opt_key != "purge_into_inner_walls");
     print.process();
 
     const auto state = print.step_state_with_warnings(psWipeTower);
