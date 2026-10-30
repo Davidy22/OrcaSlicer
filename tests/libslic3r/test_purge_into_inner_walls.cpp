@@ -187,9 +187,12 @@ TEST_CASE("Purge settings register once in their global and object scopes", "[Pu
 // (Print::_plan_purge_into_inner_walls).
 TEST_CASE("Purge flush volume estimate", "[PurgeIntoInnerWalls]")
 {
+    const size_t nozzles = GENERATE(size_t{0}, size_t{1}, size_t{2}, size_t{3});
+    CAPTURE(nozzles);
     PrintConfig config = PrintConfig::defaults();
-    config.nozzle_diameter.values      = { 0.4 };
-    config.flush_volumes_matrix.values = { 0., 100., 200., 0. }; // 2x2, row-major
+    config.nozzle_diameter.values.assign(nozzles, 0.4);
+    config.flush_volumes_matrix.values = { 0., 100., 200., 0. }; // first nozzle: 2x2, row-major
+    config.flush_volumes_matrix.values.resize(4 * std::max(nozzles, size_t{1}), 999.);
     config.flush_multiplier.values     = { 1.0 };
     config.prime_volume.value          = 42.;
     config.purge_in_prime_tower.value        = true;
@@ -204,12 +207,23 @@ TEST_CASE("Purge flush volume estimate", "[PurgeIntoInnerWalls]")
 
     // Out-of-range filament falls back to the prime volume.
     REQUIRE_THAT(estimate_flush_volume(config, 0, 5), Catch::Matchers::WithinAbs(42., 1e-4));
-
+    if (nozzles > 1) {
+        // Integer partitioning ignores a remainder after the complete nozzle slices.
+        config.flush_volumes_matrix.values.push_back(1234.);
+        REQUIRE_THAT(estimate_flush_volume(config, 1, 0), Catch::Matchers::WithinAbs(400., 1e-4));
+    }
     // Without purging volumes on a single-extruder multi-material printer,
     // every toolchange purges the plain prime volume (belt semantics).
     config.purge_in_prime_tower.value = false;
     REQUIRE_THAT(estimate_flush_volume(config, 0, 1), Catch::Matchers::WithinAbs(42., 1e-4));
     REQUIRE_THAT(estimate_flush_volume(config, 1, 1), Catch::Matchers::WithinAbs(0., 1e-4));
+
+    // Empty or non-square first-nozzle matrices also retain the prime fallback.
+    config.purge_in_prime_tower.value = true;
+    config.flush_volumes_matrix.values.resize(3 * std::max(nozzles, size_t{1}));
+    REQUIRE_THAT(estimate_flush_volume(config, 0, 1), Catch::Matchers::WithinAbs(42., 1e-4));
+    config.flush_volumes_matrix.values.clear();
+    REQUIRE_THAT(estimate_flush_volume(config, 0, 1), Catch::Matchers::WithinAbs(42., 1e-4));
 }
 
 TEST_CASE("Purge seam samples follow loop arc length rather than vertex indices", "[PurgeIntoInnerWalls][Regression]")

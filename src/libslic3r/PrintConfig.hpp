@@ -2658,12 +2658,13 @@ inline float estimate_flush_volume(const PrintConfig &config, unsigned int from_
         return 0.f;
     if (!(config.purge_in_prime_tower && config.single_extruder_multi_material))
         return (float) config.prime_volume;
-    const std::vector<double> matrix = get_flush_volumes_matrix(
-        config.flush_volumes_matrix.values, 0, std::max<size_t>(config.nozzle_diameter.values.size(), 1));
+    // The first nozzle's matrix is a prefix; repeated estimates need no copy.
+    const auto &matrix = config.flush_volumes_matrix.values;
+    const size_t matrix_size = matrix.size() / std::max<size_t>(config.nozzle_diameter.values.size(), 1);
     unsigned int num_filaments = 0;
-    while (size_t(num_filaments) * num_filaments < matrix.size())
+    while (size_t(num_filaments) * num_filaments < matrix_size)
         ++ num_filaments;
-    if (num_filaments == 0 || size_t(num_filaments) * num_filaments != matrix.size()
+    if (num_filaments == 0 || size_t(num_filaments) * num_filaments != matrix_size
         || from_filament >= num_filaments || to_filament >= num_filaments)
         return (float) config.prime_volume;
     return float(matrix[from_filament * num_filaments + to_filament]) * (float) config.flush_multiplier.get_at(0);
