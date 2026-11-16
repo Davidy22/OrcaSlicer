@@ -681,27 +681,24 @@ double SupportLayer::PurgeRegion::grow_to_ring_count(size_t min_rings)
 {
     if (min_rings <= m_grown_rings || m_areas.empty() || m_flow.spacing() <= EPSILON)
         return 0.;
-    // Ring placement is deterministic, so marching the offsets re-derives the
-    // grown state from scratch; only the acceptance count matters here.
+    // Ring placement is deterministic, so the walk re-derives the grown state
+    // from scratch; only the accepted count is read.
     return this->grow_impl(std::numeric_limits<double>::infinity(), min_rings);
 }
 
-// March circles from the region inward, one wall at a time, until both stops
-// are satisfied: the grown state must hold at least min_rings walls, and the
-// added volume must reach target_volume (pass +inf to disable the demand stop).
-// Each accepted candidate carries every ring drawn so far, and the band it
-// covers is subtracted from the native paths, so a redrawn ring never
-// overprints the path it replaces.
+// March from the region boundary inward, one ring at a time, until the grown
+// state holds at least min_rings walls and the added volume reaches
+// target_volume (pass +inf to disable the demand stop). Each accepted
+// candidate carries every ring drawn so far.
 double SupportLayer::PurgeRegion::grow_impl(double target_volume, size_t min_rings)
 {
     const double infinity = std::numeric_limits<double>::infinity();
     const double original_volume = m_paths->total_volume();
-    // Printed filament, i.e. what grow()/grow_to_ring_count() report to the
-    // caller. The acceptance decision below may add a lift credit on top of
-    // this; credit never leaks into the reported volume or the demand baseline.
+    // Printed filament reported to callers. The lift credit below affects
+    // acceptance only and never reaches this or the demand baseline.
     double volume = original_volume;
-    // Acceptance baseline: identical to `volume` on the demand path, while the
-    // lift path accumulates the consumed-loop credit here.
+    // Acceptance baseline: equals `volume` on the demand path, accumulates the
+    // lift path's consumed-loop credit here.
     double accept_volume = original_volume;
     const double spacing = m_flow.scaled_spacing();
     ExPolygons loop_areas = offset_ex(m_areas, -0.5 * spacing);
@@ -709,11 +706,10 @@ double SupportLayer::PurgeRegion::grow_impl(double target_volume, size_t min_rin
     std::optional<ExPolygons> expanded_areas;
     size_t wall_count = 0;
     // Only the lift path (min_rings > 0, demand stop disabled) may credit
-    // redrawn walls: a ring drawn over a native outer wall is consumed by the
-    // band, which is a volume-neutral replacement, and a narrow region may
-    // fit nothing beyond it. The demand path (grow()) compares printed
-    // filament only, so a residual deficit is satisfied by genuinely new
-    // walls and the caller's accounting stays exact.
+    // redrawn walls: a ring over a native outer wall is consumed by the band
+    // (a volume-neutral replacement), and a narrow region may fit nothing
+    // beyond it. The demand path compares printed filament only, so a
+    // residual deficit needs genuinely new walls.
     const auto consumed_loops_volume = [this](const ExPolygons &wall_band) {
         double volume = 0.;
         for_each_extrusion_leaf(m_original ? *m_original : *m_paths, [&](const ExtrusionEntity &entity) {

@@ -520,9 +520,8 @@ TEST_CASE("Inner-wall purge rejects only active competing belt purge planners", 
     Model model;
     Print print;
     DynamicPrintConfig config = purge_config("classic", 3);
-    // The relative-extrusion Marlin default requires an explicit "G92 E0" in the
-    // layer change g-code, as in the shortfall test above; without it validate()
-    // reports before_layer_change_gcode instead of staying silent.
+    // Relative-E Marlin default requires an explicit G92 E0 in layer_change_gcode
+    // (like the shortfall test above), else validate() fails.
     config.set_deserialize_strict({{"belt_printer", belt}, {"enable_belt_purge_tower", tower}, {"purge_into_inner_walls", purge},
                                    {"layer_change_gcode", "G92 E0\n"}});
     init_purge_print(print, model, config);

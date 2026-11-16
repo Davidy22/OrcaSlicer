@@ -220,19 +220,17 @@ TEST_CASE("Demand growth replaces the native outer wall first", "[PurgeSupport][
 {
     const Flow flow(0.45f, 0.2f, 0.4f);
     ExtrusionEntityCollection paths = sparse_support(flow);
-    // A native outer wall at the offset native generators use. There is no
-    // outer-wall reservation anymore: the first grown ring replaces it instead
-    // of skipping past it.
+    // Native outer wall at the offset native generators use; it is redrawn,
+    // not preserved.
     const ExPolygons outer = offset_ex(ExPolygons{support_box()}, -0.5 * flow.scaled_spacing());
     extrusion_entities_append_loops(paths.entities, to_polygons(outer), erSupportMaterial,
                                     flow.mm3_per_mm(), flow.width(), flow.height());
     const size_t native_loops = support_loop_count(paths);
     REQUIRE(native_loops == 1);
     SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow);
-    // Far less volume than a single new wall. A redrawn native outer wall
-    // adds no capacity, so covering this residual demand requires one ring
-    // beyond it; the native wall is still consumed by the redraw instead of
-    // printed over, so the count equals the grown ring count.
+    // Far less volume than one new wall, so the residual demand still needs
+    // one ring beyond the volume-neutral redraw of the native outer wall; the
+    // count equals the grown ring count.
     const double added = region.grow(0.001);
     REQUIRE(added > 0.);
     CHECK(region.grown_rings() == 2);
@@ -244,22 +242,19 @@ TEST_CASE("grow_to_ring_count lifts a region to carry the layers above", "[Purge
     const Flow flow(0.45f, 0.2f, 0.4f);
     ExtrusionEntityCollection paths = sparse_support(flow);
     SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow);
-    // No purge volume is demanded; the lift still has to happen so walls grown
-    // above do not print in mid air.
+    // No demand, but the lift still happens so grown walls above don't print
+    // in mid air.
     CHECK(region.grow_to_ring_count(2) > 0.);
     CHECK(region.grown_rings() == 2);
     CHECK(support_loop_count(paths) == 2);
     // Never shrinks an already-taller stack.
     CHECK_THAT(region.grow_to_ring_count(1), WithinAbs(0., 1e-6));
     CHECK(region.grown_rings() == 2);
-    // A demand-driven growth is extended the same way.
     region.reset();
     REQUIRE(region.grow(0.001) > 0.);
     CHECK(region.grown_rings() == 1);
     CHECK(region.grow_to_ring_count(4) > 0.);
     CHECK(region.grown_rings() == 4);
-    // Reset restores the native paths; the ring placement is re-derived from scratch,
-    // so nothing about a lifted stack survives a reset.
     region.reset();
     CHECK(region.grown_rings() == 0);
 }

@@ -1858,8 +1858,6 @@ void TreeSupport::generate_toolpaths()
                         //ORCA: Keep per-area base paths grouped for outline->fill preservation.
                         if (!base_eec->empty()) {
                             if (m_print_config->purge_into_inner_walls)
-                                // No native wall reservation: the grown wall stack
-                                // replaces whatever it covers, including the native outer wall.
                                 ts_layer->purge_support_regions.emplace_back(*base_eec, ExPolygons{poly}, flow);
                             ts_layer->support_fills.entities.push_back(base_eec.release());
                         }

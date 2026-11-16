@@ -1974,8 +1974,6 @@ void generate_support_toolpaths(
                         ExtrusionRole::erSupportMaterial, flow,
                         support_params, sheath, no_sort);
                 if (purge_support) {
-                    // No native wall reservation: the grown wall stack replaces
-                    // whatever it covers, including the native outer wall.
                     layer_cache.purge_growth_areas = union_ex(base_layer.polygons_to_extrude());
                     layer_cache.purge_growth_flow = flow;
                 }

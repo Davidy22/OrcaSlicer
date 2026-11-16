@@ -204,10 +204,9 @@ TEST_CASE("Supports absorb residual purge after model walls and grow past two lo
                         copies_differ = true;
                 });
             }
-        // Model walls are exhausted before support paths get any purge. The only wall
-        // left native on a layer whose support carries purge is the reserved outermost
-        // shell of a wall family (and shells whose own filament never changes there).
-        // So with support claimed, every non-shell purge candidate must be overridden.
+        // Support paths get purge only after model walls are excluded; the
+        // outermost shell of each wall family is exempt, so with support
+        // claimed every non-shell purge candidate must be overridden.
         if (support_claimed)
             for (const PrintObject *object : print.objects())
                 if (const Layer *layer = object->get_layer_at_printz(tools.print_z, EPSILON))
@@ -236,8 +235,6 @@ TEST_CASE("Supports absorb residual purge after model walls and grow past two lo
                 region.reset();
                 if (grown_volume > region.collection()->total_volume() + EPSILON) {
                     ++grown_regions;
-                    // No native wall reservation anymore: the grown stack takes
-                    // over the outer wall too.
                     CHECK(loops > 0);
                 }
             }
@@ -386,11 +383,8 @@ TEST_CASE("Grown support walls never print in mid air", "[PurgeSupport][PurgeInt
             const SupportLayer *layer = layers[layer_idx];
             for (const auto &region : layer->purge_support_regions) {
                 const BoundingBox region_box = region.bbox();
-                // Degenerate regions carry no walls and are best effort too.
                 if (!region_box.defined)
                     continue;
-                // Every region must carry at least as many walls as every
-                // overlapping grown region above it.
                 for (const auto &[upper_box, upper_rings] : above)
                     if (region_box.overlap(upper_box))
                         CHECK(region.grown_rings() >= upper_rings);
