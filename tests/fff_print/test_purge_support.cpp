@@ -21,6 +21,7 @@
 
 #include <cstddef>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace Slic3r;
