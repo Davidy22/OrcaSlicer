@@ -324,9 +324,8 @@ class SupportLayer : public Layer
 {
 public:
     // Growth/replanning state for existing support-fill groups, shared by normal and tree supports.
-    // No outer-wall reservation: the whole stack, redrawn outer walls
-    // included, may carry purge. Grown rings are tracked so the layers
-    // below a grown layer can be lifted to carry at least as many.
+    // No outer-wall reservation: the stack (redrawn outer walls included) is
+    // purgeable; grown-ring counts let the layers below be lifted to match.
     class PurgeRegion
     {
     public:
