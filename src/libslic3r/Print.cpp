@@ -5589,19 +5589,17 @@ void Print::_plan_purge_into_inner_walls()
         }
     }
 
-    // Downward wall-count propagation for the grown support walls: a wall
-    // grown on a support layer prints in mid air if the layers below do not
-    // carry at least as many walls. Walk each object's support base layers top
-    // to bottom; every region still has to reach the ring count of the most
-    // demanding grown region above that overlaps it. The lift adds structural
-    // walls, not deficit capacity (the deficit pass above closed its books
-    // already), but they are ordinary support paths on the final geometry: the
-    // allocation passes below see them and may let them absorb purge too. Best
-    // effort: regions that run solid cannot grow further. The grown state of a region is global and monotonic, so identical
-    // slicings sharing a support layer can safely walk it again: an already
-    // satisfied requirement is a no-op there, and a requirement that only
-    // exists because of the other object's taller unshared stack above still
-    // has to lift this layer.
+    // Downward propagation for grown support walls: a grown wall needs at
+    // least as many walls on the layer below. Walk each object's support
+    // layers top to bottom; every region reaches the ring count of the most
+    // demanding grown region overlapping it from above. The lift adds
+    // structural walls, not deficit demand (the deficit pass above is done),
+    // but they are ordinary support paths: the allocation below sees them and
+    // may use them. Best effort — regions that run solid cannot grow further.
+    // The grown state is global and monotonic, so identical objects sharing a
+    // support layer walk it independently: an already satisfied requirement is
+    // a no-op, and one object's taller unshared stack still lifts the shared
+    // regions.
     for (PrintObject *object : m_objects) {
         SupportLayerPtrs &object_support_layers = object->support_layers();
         std::vector<std::pair<BoundingBox, size_t>> grown_above;
