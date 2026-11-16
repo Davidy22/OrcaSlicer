@@ -324,9 +324,9 @@ class SupportLayer : public Layer
 {
 public:
     // Growth/replanning state for existing support-fill groups, shared by normal and tree supports.
-    // No native outer-wall reservation: the whole stack, including redrawn
-    // outer walls, may carry purge. Grown rings are tracked so the layers
-    // below a grown layer can be lifted to carry at least as many walls.
+    // No outer-wall reservation: the whole stack, redrawn outer walls
+    // included, may carry purge. Grown rings are tracked so the layers
+    // below a grown layer can be lifted to carry at least as many.
     class PurgeRegion
     {
     public:
@@ -345,8 +345,7 @@ public:
         ExtrusionEntityCollection *m_paths;
         ExPolygons m_areas;
         Flow m_flow;
-        // Accepted rings in the growth state; a candidate carries every ring
-        // drawn so far, so the count can only rise on acceptance.
+        // Accepted rings in the growth state; acceptance can only raise the count.
         size_t m_grown_rings = 0;
         std::unique_ptr<ExtrusionEntityCollection> m_original;
     };
