@@ -1679,7 +1679,6 @@ void generate_support_toolpaths(
         Polygons polys_to_iron;
         ExPolygons purge_growth_areas;
         Flow purge_growth_flow;
-        size_t purge_base_wall_count = 0;
 
         void add_nonempty_and_sort() {
             for (SupportGeneratorLayerExtruded *item : { &bottom_contact_layer, &top_contact_layer, &interface_layer, &base_interface_layer, &base_layer })
@@ -1975,12 +1974,10 @@ void generate_support_toolpaths(
                         ExtrusionRole::erSupportMaterial, flow,
                         support_params, sheath, no_sort);
                 if (purge_support) {
+                    // No native wall reservation: the grown wall stack replaces
+                    // whatever it covers, including the native outer wall.
                     layer_cache.purge_growth_areas = union_ex(base_layer.polygons_to_extrude());
                     layer_cache.purge_growth_flow = flow;
-                    layer_cache.purge_base_wall_count = std::max(config.tree_support_wall_count.value, sheath ? 1 : 0);
-                    // Auto tree branches can already have a second wall.
-                    if (done || (sheath && density == 0.f))
-                        layer_cache.purge_base_wall_count = std::max<size_t>(2, layer_cache.purge_base_wall_count);
                 }
             }
 
@@ -2054,7 +2051,7 @@ void generate_support_toolpaths(
                     auto paths = std::make_unique<ExtrusionEntityCollection>();
                     paths->append(std::move(layer_cache.base_layer.extrusions));
                     support_layer.purge_support_regions.emplace_back(*paths, std::move(areas),
-                        layer_cache.purge_growth_flow, layer_cache.purge_base_wall_count);
+                        layer_cache.purge_growth_flow);
                     support_layer.support_fills.entities.emplace_back(paths.release());
                 } else {
                     support_layer.support_fills.append(std::move(layer_cache_item.layer_extruded->extrusions));

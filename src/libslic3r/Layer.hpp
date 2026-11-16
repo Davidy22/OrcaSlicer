@@ -324,19 +324,34 @@ class SupportLayer : public Layer
 {
 public:
     // Growth/replanning state for existing support-fill groups, shared by normal and tree supports.
+    // There is no native outer-wall reservation: the whole wall stack, including
+    // ones redrawn over the native outer wall, is fair game for purging —
+    // supports don't need a pretty skin. The grown rings are tracked so the
+    // layers below a grown layer can be lifted to carry at least as many walls
+    // (grown walls must not print in mid air).
     class PurgeRegion
     {
     public:
-        PurgeRegion(ExtrusionEntityCollection &paths, ExPolygons areas, const Flow &flow, size_t base_wall_count);
+        PurgeRegion(ExtrusionEntityCollection &paths, ExPolygons areas, const Flow &flow);
         void reset();
         double grow(double additional_volume);
+        // Grow until the region carries at least min_rings walls, even though no
+        // purge volume is demanded for them. Best effort: stops when the area
+        // turns solid. Used to carry the grown walls of the layers above.
+        double grow_to_ring_count(size_t min_rings);
+        size_t grown_rings() const { return m_grown_rings; }
+        BoundingBox bbox() const { return get_extents(m_areas); }
         const ExtrusionEntityCollection *collection() const { return m_paths; }
 
     private:
+        double grow_impl(double target_volume, size_t min_rings);
         ExtrusionEntityCollection *m_paths;
         ExPolygons m_areas;
         Flow m_flow;
-        size_t m_base_wall_count;
+        // Rings in the accepted growth state; each accepted candidate carries
+        // every ring drawn up to that point, so a full replacement can only
+        // ever raise the accepted count.
+        size_t m_grown_rings = 0;
         std::unique_ptr<ExtrusionEntityCollection> m_original;
     };
 

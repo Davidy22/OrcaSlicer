@@ -71,7 +71,7 @@ TEST_CASE("Support wall growth replaces infill instead of overprinting it", "[Pu
     const Flow flow(0.45f, 0.2f, 0.4f);
     ExtrusionEntityCollection paths = sparse_support(flow);
     const double before = paths.total_volume();
-    SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow, 0);
+    SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow);
     CHECK_THAT(region.grow(0.), WithinAbs(0., 1e-8));
     const double added = region.grow(1.);
     REQUIRE(added > 0.);
@@ -95,14 +95,12 @@ TEST_CASE("Support wall growth replaces infill instead of overprinting it", "[Pu
 
 TEST_CASE("Support walls extend to solid capacity and restore their native paths", "[PurgeSupport][PurgeIntoInnerWalls][Regression]")
 {
-    const size_t base_walls = GENERATE(size_t{0}, size_t{2});
-    CAPTURE(base_walls);
     const Flow flow(0.45f, 0.2f, 0.4f);
     size_t clones = 0;
     ExtrusionEntityCollection paths = sparse_support(flow, &clones);
     const ExtrusionEntitiesPtr native_paths = paths.entities;
     const double native_volume = paths.total_volume();
-    SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow, base_walls);
+    SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow);
     const double first = region.grow(1.);
     REQUIRE(first > 0.);
     const double remaining = region.grow(10000.);
@@ -110,7 +108,7 @@ TEST_CASE("Support walls extend to solid capacity and restore their native paths
     const size_t count = support_loop_count(paths);
     CHECK(count > 2);
     CHECK_THAT(paths.total_volume(), WithinAbs(native_volume + first + remaining, 1e-6));
-    // Geometry, not the UI's two-loop maximum, bounds the runtime count.
+    // Geometry, not a wall-count reservation, bounds the runtime count.
     CHECK(count < size_t(scale_(20.) / flow.scaled_spacing()));
     CHECK(paths.total_volume() < 20. * 20. * flow.height() * 1.1);
     CHECK_THAT(region.grow(10000.), WithinAbs(0., 1e-6));
@@ -137,7 +135,7 @@ TEST_CASE("Support growth respects holes and retains paths outside its safe regi
     ExtrusionPath outside(erSupportMaterial, 0.03, 0.4f, 0.1f);
     outside.polyline = Polyline3(Polyline(Points{Point::new_scale(-5., 0.), Point::new_scale(-1., 0.)}));
     paths.append(outside);
-    SupportLayer::PurgeRegion region(paths, ExPolygons{area}, flow, 0);
+    SupportLayer::PurgeRegion region(paths, ExPolygons{area}, flow);
     REQUIRE(region.grow(10000.) > 0.);
     size_t preserved = 0;
     for_each_extrusion_path(paths, [&](const ExtrusionPath &path) {
@@ -176,7 +174,7 @@ TEST_CASE("Support regions that cannot grow do not copy native paths", "[PurgeSu
     const ExtrusionEntitiesPtr original = paths.entities;
     // Only a subset of a support group may be safe for growth. This footprint
     // vanishes at the first wall offset, so the native paths must stay untouched.
-    SupportLayer::PurgeRegion region(paths, ExPolygons{support_box(0.1)}, flow, 2);
+    SupportLayer::PurgeRegion region(paths, ExPolygons{support_box(0.1)}, flow);
     CHECK_THAT(region.grow(10000.), WithinAbs(0., 1e-8));
     CHECK(clones == 0);
     region.reset();
@@ -191,7 +189,7 @@ TEST_CASE("Support replanning restores repeatable growth without copying native 
     ExtrusionEntityCollection paths = sparse_support(flow, &clones);
     const double native_volume = paths.total_volume();
     const ExtrusionEntitiesPtr native_paths = paths.entities;
-    SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow, 1);
+    SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow);
     double low_demand_volume = 0.;
     size_t low_demand_loops = 0;
     for (size_t iteration = 0; iteration < 16; ++iteration) {
@@ -216,4 +214,57 @@ TEST_CASE("Support replanning restores repeatable growth without copying native 
         CHECK(paths.entities == native_paths);
         CHECK(clones == 0);
     }
+}
+
+TEST_CASE("Demand growth replaces the native outer wall first", "[PurgeSupport][PurgeIntoInnerWalls][Regression]")
+{
+    const Flow flow(0.45f, 0.2f, 0.4f);
+    ExtrusionEntityCollection paths = sparse_support(flow);
+    // A native outer wall at the offset native generators use. There is no
+    // outer-wall reservation anymore: the first grown ring replaces it instead
+    // of skipping past it.
+    const ExPolygons outer = offset_ex(ExPolygons{support_box()}, -0.5 * flow.scaled_spacing());
+    extrusion_entities_append_loops(paths.entities, to_polygons(outer), erSupportMaterial,
+                                    flow.mm3_per_mm(), flow.width(), flow.height());
+    const size_t native_loops = support_loop_count(paths);
+    REQUIRE(native_loops == 1);
+    SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow);
+    // Far less volume than a single new wall. A redrawn native outer wall
+    // adds no capacity, so covering this residual demand requires one ring
+    // beyond it; the native wall is still consumed by the redraw instead of
+    // printed over, so the count equals the grown ring count.
+    const double added = region.grow(0.001);
+    REQUIRE(added > 0.);
+    CHECK(region.grown_rings() == 2);
+    CHECK(support_loop_count(paths) == 2);
+}
+
+TEST_CASE("grow_to_ring_count lifts a region to carry the layers above", "[PurgeSupport][PurgeIntoInnerWalls][Regression]")
+{
+    const Flow flow(0.45f, 0.2f, 0.4f);
+    ExtrusionEntityCollection paths = sparse_support(flow);
+    const ExtrusionEntitiesPtr native_paths = paths.entities;
+    SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow);
+    // No purge volume is demanded; the lift still has to happen so walls grown
+    // above do not print in mid air.
+    CHECK(region.grow_to_ring_count(2) > 0.);
+    CHECK(region.grown_rings() == 2);
+    CHECK(support_loop_count(paths) == 2);
+    // Never shrinks an already-taller stack.
+    CHECK_THAT(region.grow_to_ring_count(1), WithinAbs(0., 1e-6));
+    CHECK(region.grown_rings() == 2);
+    // A demand-driven growth is extended the same way.
+    region.reset();
+    REQUIRE(region.grow(0.001) > 0.);
+    CHECK(region.grown_rings() == 1);
+    CHECK(region.grow_to_ring_count(4) > 0.);
+    CHECK(region.grown_rings() == 4);
+    region.reset();
+    CHECK(region.grown_rings() == 0);
+    CHECK(paths.entities == native_paths);
+    // After a reset the region carries nothing and can be lifted from scratch.
+    CHECK(region.grow_to_ring_count(3) > 0.);
+    CHECK(region.grown_rings() == 3);
+    region.reset();
+    CHECK(paths.entities == native_paths);
 }
