@@ -681,24 +681,20 @@ double SupportLayer::PurgeRegion::grow_to_ring_count(size_t min_rings)
 {
     if (min_rings <= m_grown_rings || m_areas.empty() || m_flow.spacing() <= EPSILON)
         return 0.;
-    // Ring placement is deterministic, so the walk re-derives the grown state
-    // from scratch; only the accepted count is read.
     return this->grow_impl(std::numeric_limits<double>::infinity(), min_rings);
 }
 
-// March from the region boundary inward, one ring at a time, until the grown
-// state holds at least min_rings walls and the added volume reaches
-// target_volume (pass +inf to disable the demand stop). Each accepted
-// candidate carries every ring drawn so far.
+// March inward one ring at a time until both stops are met: the grown state
+// holds at least min_rings walls, and the volume reaches target_volume
+// (+inf disables the demand stop).
 double SupportLayer::PurgeRegion::grow_impl(double target_volume, size_t min_rings)
 {
     const double infinity = std::numeric_limits<double>::infinity();
     const double original_volume = m_paths->total_volume();
-    // Printed filament reported to callers. The lift credit below affects
-    // acceptance only and never reaches this or the demand baseline.
+    // Printed filament reported to callers. `accept_volume` is the acceptance
+    // baseline: identical to `volume` on the demand path, plus the lift's
+    // consumed-loop credit; the credit never leaks into the report.
     double volume = original_volume;
-    // Acceptance baseline: equals `volume` on the demand path, accumulates the
-    // lift path's consumed-loop credit here.
     double accept_volume = original_volume;
     const double spacing = m_flow.scaled_spacing();
     ExPolygons loop_areas = offset_ex(m_areas, -0.5 * spacing);
