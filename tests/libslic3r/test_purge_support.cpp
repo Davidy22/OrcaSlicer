@@ -240,8 +240,6 @@ TEST_CASE("grow_to_ring_count lifts a region to carry the layers above", "[Purge
     const Flow flow(0.45f, 0.2f, 0.4f);
     ExtrusionEntityCollection paths = sparse_support(flow);
     SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow);
-    // No demand, but the lift still happens so grown walls above don't print
-    // in mid air.
     CHECK(region.grow_to_ring_count(2) > 0.);
     CHECK(region.grown_rings() == 2);
     CHECK(support_loop_count(paths) == 2);

@@ -5589,17 +5589,15 @@ void Print::_plan_purge_into_inner_walls()
         }
     }
 
-    // Downward propagation for grown support walls: a grown wall needs at
-    // least as many walls on the layer below. Walk each object's support
-    // layers top to bottom; every region reaches the ring count of the most
-    // demanding grown region overlapping it from above. The lift adds
-    // structural walls, not deficit demand (the deficit pass above is done),
-    // but they are ordinary support paths: the allocation below sees them and
-    // may use them. Best effort — regions that run solid cannot grow further.
-    // The grown state is global and monotonic, so identical objects sharing a
-    // support layer walk it independently: an already satisfied requirement is
-    // a no-op, and one object's taller unshared stack still lifts the shared
-    // regions.
+    // Downward propagation: grown support walls need the layer below to carry
+    // at least as many walls; walk top to bottom and lift every region to the
+    // ring count of the most demanding region overlapping it from above.
+    // The lift adds structural walls, not deficit demand (the deficit pass above
+    // is done), and they are ordinary support paths the allocation below may use.
+    // Best effort — regions that run solid cannot grow further. The grown state
+    // is global and monotonic, so walking a shared support layer twice is safe:
+    // an already satisfied requirement is a no-op, and one object's taller
+    // unshared stack still lifts the shared regions.
     for (PrintObject *object : m_objects) {
         SupportLayerPtrs &object_support_layers = object->support_layers();
         std::vector<std::pair<BoundingBox, size_t>> grown_above;

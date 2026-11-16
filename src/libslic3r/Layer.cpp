@@ -485,9 +485,8 @@ double SupportLayer::PurgeRegion::grow_impl(double target_volume, size_t min_rin
 {
     const double infinity = std::numeric_limits<double>::infinity();
     const double original_volume = m_paths->total_volume();
-    // Printed filament reported to callers. `accept_volume` is the acceptance
-    // baseline: identical to `volume` on the demand path, plus the lift's
-    // consumed-loop credit; the credit never leaks into the report.
+    // Printed filament reported to callers; the lift credit reaches only the
+    // acceptance baseline `accept_volume` (== `volume` on the demand path).
     double volume = original_volume;
     double accept_volume = original_volume;
     const double spacing = m_flow.scaled_spacing();
@@ -495,11 +494,9 @@ double SupportLayer::PurgeRegion::grow_impl(double target_volume, size_t min_rin
     ExtrusionEntityCollection walls;
     std::optional<ExPolygons> expanded_areas;
     size_t wall_count = 0;
-    // Only the lift path (min_rings > 0, demand stop disabled) may credit
-    // redrawn walls: a ring over a native outer wall is consumed by the band
-    // (a volume-neutral replacement), and a narrow region may fit nothing
-    // beyond it. The demand path compares printed filament only, so a
-    // residual deficit needs genuinely new walls.
+    // Lift path only (min_rings > 0, demand disabled): a native-wall redraw
+    // is volume-neutral and a narrow region may fit nothing else, so credit
+    // consumed redraws; the demand path compares printed filament only.
     const auto consumed_loops_volume = [this](const ExPolygons &wall_band) {
         double volume = 0.;
         for_each_extrusion_leaf(m_original ? *m_original : *m_paths, [&](const ExtrusionEntity &entity) {
