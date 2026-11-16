@@ -478,9 +478,8 @@ double SupportLayer::PurgeRegion::grow_to_ring_count(size_t min_rings)
     return this->grow_impl(std::numeric_limits<double>::infinity(), min_rings);
 }
 
-// March inward one ring at a time until both stops are met: the grown state
-// holds at least min_rings walls, and the volume reaches target_volume
-// (+inf disables the demand stop).
+// March inward one ring at a time until the region carries min_rings walls
+// and the volume reaches target_volume (+inf disables the demand stop).
 double SupportLayer::PurgeRegion::grow_impl(double target_volume, size_t min_rings)
 {
     const double infinity = std::numeric_limits<double>::infinity();

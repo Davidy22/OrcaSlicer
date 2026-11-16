@@ -222,9 +222,8 @@ DynamicPrintConfig multifilament_config(unsigned int filaments, std::initializer
 
 	// These are read by filament id during export but absent from filament_option_keys(),
 	// so set_num_filaments leaves them size 1; size them too, else out-of-range access.
-	// filament_soluble / filament_is_support are read by index too (purge demand,
-	// can_purge, config diffs): a size-1 vector<bool> silently survives values[1]
-	// and compares equal, so the re-apply diff comes out empty.
+	// filament_soluble / filament_is_support are indexed too (purge demand, can_purge,
+	// config diffs): a size-1 vector<bool> silently survives values[n] and diffs empty.
 	const auto &defaults = FullPrintConfig::defaults();
 	for (const char *key : { "filament_type", "filament_vendor", "filament_start_gcode", "filament_change_length", "filament_change_length_nc",
 	                         "filament_ramming_travel_time", "filament_ramming_travel_time_nc",
