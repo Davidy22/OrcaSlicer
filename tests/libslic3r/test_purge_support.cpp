@@ -108,7 +108,6 @@ TEST_CASE("Support walls extend to solid capacity and restore their native paths
     const size_t count = support_loop_count(paths);
     CHECK(count > 2);
     CHECK_THAT(paths.total_volume(), WithinAbs(native_volume + first + remaining, 1e-6));
-    // Geometry, not a wall-count reservation, bounds the runtime count.
     CHECK(count < size_t(scale_(20.) / flow.scaled_spacing()));
     CHECK(paths.total_volume() < 20. * 20. * flow.height() * 1.1);
     CHECK_THAT(region.grow(10000.), WithinAbs(0., 1e-6));
@@ -228,9 +227,8 @@ TEST_CASE("Demand growth replaces the native outer wall first", "[PurgeSupport][
     const size_t native_loops = support_loop_count(paths);
     REQUIRE(native_loops == 1);
     SupportLayer::PurgeRegion region(paths, ExPolygons{support_box()}, flow);
-    // Far less volume than one new wall, so the residual demand still needs
-    // one ring beyond the volume-neutral redraw of the native outer wall; the
-    // count equals the grown ring count.
+    // Near-zero demand: the redrawn native outer wall is volume-neutral, so
+    // one ring beyond it is needed; the count equals the grown ring count.
     const double added = region.grow(0.001);
     REQUIRE(added > 0.);
     CHECK(region.grown_rings() == 2);
@@ -247,7 +245,6 @@ TEST_CASE("grow_to_ring_count lifts a region to carry the layers above", "[Purge
     CHECK(region.grow_to_ring_count(2) > 0.);
     CHECK(region.grown_rings() == 2);
     CHECK(support_loop_count(paths) == 2);
-    // Never shrinks an already-taller stack.
     CHECK_THAT(region.grow_to_ring_count(1), WithinAbs(0., 1e-6));
     CHECK(region.grown_rings() == 2);
     region.reset();

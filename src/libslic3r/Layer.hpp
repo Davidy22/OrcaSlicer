@@ -333,7 +333,6 @@ public:
         double grow(double additional_volume);
         // Grow until the region carries at least min_rings walls; no purge
         // volume is demanded. Best effort: stops when the area turns solid.
-        // Used to carry the grown walls of the layers above.
         double grow_to_ring_count(size_t min_rings);
         size_t grown_rings() const { return m_grown_rings; }
         BoundingBox bbox() const { return get_extents(m_areas); }
