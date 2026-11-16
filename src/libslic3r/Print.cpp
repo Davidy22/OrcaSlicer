@@ -5593,9 +5593,10 @@ void Print::_plan_purge_into_inner_walls()
     // grown on a support layer prints in mid air if the layers below do not
     // carry at least as many walls. Walk each object's support base layers top
     // to bottom; every region still has to reach the ring count of the most
-    // demanding grown region above that overlaps it. The extra walls are not
-    // purge capacity, they exist to carry the grown walls above, so they are
-    // added before the allocation below can claim any support path. Best
+    // demanding grown region above that overlaps it. The lift adds structural
+    // walls, not deficit capacity (the deficit pass above closed its books
+    // already), but they are ordinary support paths on the final geometry: the
+    // allocation passes below see them and may let them absorb purge too. Best
     // effort: regions that run solid cannot grow further. The grown state of a region is global and monotonic, so identical
     // slicings sharing a support layer can safely walk it again: an already
     // satisfied requirement is a no-op there, and a requirement that only
