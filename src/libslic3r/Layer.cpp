@@ -25,6 +25,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <limits>
 #include "Config.hpp"
 #include "MultiMaterialSegmentation.hpp"
 #include "ObjectID.hpp"
@@ -447,9 +448,8 @@ void Layer::simplify_support_loop(ExtrusionLoop* loop)
     }
 }
 
-SupportLayer::PurgeRegion::PurgeRegion(ExtrusionEntityCollection &paths, ExPolygons areas, const Flow &flow, size_t base_wall_count)
-    : m_paths(&paths), m_areas(std::move(areas)), m_flow(flow),
-      m_base_wall_count(base_wall_count)
+SupportLayer::PurgeRegion::PurgeRegion(ExtrusionEntityCollection &paths, ExPolygons areas, const Flow &flow)
+    : m_paths(&paths), m_areas(std::move(areas)), m_flow(flow)
 {
 }
 
@@ -461,52 +461,102 @@ void SupportLayer::PurgeRegion::reset()
         m_paths->swap(*m_original);
         m_original.reset();
     }
+    m_grown_rings = 0;
 }
 
 double SupportLayer::PurgeRegion::grow(double additional_volume)
 {
     if (additional_volume <= EPSILON || m_areas.empty() || m_flow.spacing() <= EPSILON)
         return 0.;
+    return this->grow_impl(m_paths->total_volume() + additional_volume, 0);
+}
+
+double SupportLayer::PurgeRegion::grow_to_ring_count(size_t min_rings)
+{
+    if (min_rings <= m_grown_rings || m_areas.empty() || m_flow.spacing() <= EPSILON)
+        return 0.;
+    // Ring placement is deterministic, so marching the offsets re-derives the
+    // grown state from scratch; only the acceptance count matters here.
+    return this->grow_impl(std::numeric_limits<double>::infinity(), min_rings);
+}
+
+// March circles from the region inward, one wall at a time, until both stops
+// are satisfied: the grown state must hold at least min_rings walls, and the
+// added volume must reach target_volume (pass +inf to disable the demand stop).
+// Each accepted candidate carries every ring drawn so far, and the band it
+// covers is subtracted from the native paths, so a redrawn ring never
+// overprints the path it replaces.
+double SupportLayer::PurgeRegion::grow_impl(double target_volume, size_t min_rings)
+{
+    const double infinity = std::numeric_limits<double>::infinity();
     const double original_volume = m_paths->total_volume();
-    const double target_volume = original_volume + additional_volume;
     double volume = original_volume;
     const double spacing = m_flow.scaled_spacing();
     ExPolygons loop_areas = offset_ex(m_areas, -0.5 * spacing);
     ExtrusionEntityCollection walls;
     std::optional<ExPolygons> expanded_areas;
     size_t wall_count = 0;
-    while (!loop_areas.empty() && volume + EPSILON < target_volume) {
+    // Only the lift path (min_rings > 0, demand stop disabled) may credit
+    // redrawn walls: a ring drawn over a native outer wall is consumed by the
+    // band, which is a volume-neutral replacement, and a narrow region may
+    // fit nothing beyond it. The demand path (grow()) compares printed
+    // filament only, so a residual deficit is satisfied by genuinely new
+    // walls and the caller's accounting stays exact.
+    const auto consumed_loops_volume = [this](const ExPolygons &wall_band) {
+        double volume = 0.;
+        for_each_extrusion_leaf(m_original ? *m_original : *m_paths, [&](const ExtrusionEntity &entity) {
+            const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity);
+            if (loop == nullptr)
+                return;
+            const Polygon loop_poly = loop->polygon();
+            if (loop_poly.points.size() < 3)
+                return;
+            const double loop_area = std::abs(area(loop_poly));
+            double covered = 0.;
+            for (const ExPolygon &part : intersection_ex(wall_band, ExPolygons{ ExPolygon(loop_poly) }))
+                covered += area(part.contour);
+            if (covered >= 0.999 * loop_area)
+                volume += loop->total_volume();
+        });
+        return volume;
+    };
+    const auto done = [&]() {
+        const bool demand_satisfied = target_volume >= infinity || volume + EPSILON >= target_volume;
+        return demand_satisfied && m_grown_rings >= min_rings;
+    };
+    while (!loop_areas.empty() && !done()) {
         ++wall_count;
         extrusion_entities_append_loops(walls.entities, to_polygons(loop_areas), erSupportMaterial,
                                         m_flow.mm3_per_mm(), m_flow.width(), m_flow.height());
-        if (wall_count > m_base_wall_count) {
-            // Replace the wall band, rather than superimposing walls on the
-            // existing infill. Preserve native fill (including its individual
-            // heights/flows) in the interior and outside this growth region.
-            const ExPolygons interior = offset_ex(loop_areas, -0.5 * spacing);
-            // This boundary is invariant; defer it until an extra wall is possible.
-            if (!expanded_areas)
-                expanded_areas = offset_ex(m_areas, SCALED_EPSILON);
-            const ExPolygons wall_band = diff_ex(*expanded_areas, interior);
-            ExtrusionEntityCollection candidate(walls);
-            candidate.no_sort = true; // support outlines before remaining fill
-            for_each_extrusion_path(m_original ? *m_original : *m_paths, [&](const ExtrusionPath &path) {
-                path.subtract_expolygons(wall_band, &candidate);
-            });
-            const double candidate_volume = candidate.total_volume();
-            // Dense first layers or narrow branches may already have as much
-            // capacity as these loops. Never reduce their existing capacity.
-            if (candidate_volume > volume + EPSILON) {
-                // Save the native paths only on accepted growth, transferring
-                // ownership instead of deep-copying paths we are about to replace.
-                if (!m_original)
-                    m_original = std::make_unique<ExtrusionEntityCollection>(std::move(*m_paths));
-                volume = candidate_volume;
-                m_paths->swap(candidate);
-            }
+        // Replace the wall band, rather than superimposing walls on the
+        // existing infill. Preserve native fill (including its individual
+        // heights/flows) in the interior and outside this growth region.
+        const ExPolygons interior = offset_ex(loop_areas, -0.5 * spacing);
+        // This boundary is invariant; defer it until an extra wall is possible.
+        if (!expanded_areas)
+            expanded_areas = offset_ex(m_areas, SCALED_EPSILON);
+        const ExPolygons wall_band = diff_ex(*expanded_areas, interior);
+        ExtrusionEntityCollection candidate(walls);
+        candidate.no_sort = true; // support outlines before remaining fill
+        for_each_extrusion_path(m_original ? *m_original : *m_paths, [&](const ExtrusionPath &path) {
+            path.subtract_expolygons(wall_band, &candidate);
+        });
+        double candidate_volume = candidate.total_volume();
+        if (min_rings > 0)
+            candidate_volume += consumed_loops_volume(wall_band);
+        // Dense first layers or narrow branches may already have as much
+        // capacity as these loops. Never reduce their existing capacity.
+        if (candidate_volume > volume + EPSILON) {
+            // Save the native paths only on accepted growth, transferring
+            // ownership instead of deep-copying paths we are about to replace.
+            if (!m_original)
+                m_original = std::make_unique<ExtrusionEntityCollection>(std::move(*m_paths));
+            volume = candidate_volume;
+            m_paths->swap(candidate);
+            m_grown_rings = std::max(m_grown_rings, wall_count);
         }
-        if (volume + EPSILON >= target_volume)
-            break; // No next ring is needed once the request is satisfied.
+        if (done())
+            break;
         // Same shrink/open operation as native tree support walls: narrow
         // remnants disappear instead of producing overlapping/overflowing loops.
         loop_areas = offset2_ex(loop_areas, -1.4 * spacing, 0.4 * spacing);

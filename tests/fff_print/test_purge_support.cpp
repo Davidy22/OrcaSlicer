@@ -135,6 +135,10 @@ void check_support_export(Print &print)
     for (const auto &move : result.moves) {
         if (move.type != EMoveType::Extrude)
             continue;
+        // Actual-speed split vertices repeat their parent move's extrusion; production
+        // consumers (GCodeViewer, GCodeStatistics) skip them when accounting filament.
+        if (move.internal_only)
+            continue;
         if (is_support(move.extrusion_role)) {
             const double diameter = print.config().filament_diameter.get_at(move.extruder_id);
             actual.at(move.extruder_id) += move.delta_extruder * PI * diameter * diameter * 0.25;
@@ -200,15 +204,23 @@ TEST_CASE("Supports absorb residual purge after model walls and grow past two lo
                         copies_differ = true;
                 });
             }
+        // Model walls are exhausted before support paths get any purge. The only wall
+        // left native on a layer whose support carries purge is the reserved outermost
+        // shell of a wall family (and shells whose own filament never changes there).
+        // So with support claimed, every non-shell purge candidate must be overridden.
         if (support_claimed)
             for (const PrintObject *object : print.objects())
                 if (const Layer *layer = object->get_layer_at_printz(tools.print_z, EPSILON))
-                    for (const LayerRegion *region : layer->regions())
-                        for (const ExtrusionEntity *entity : region->perimeters.entities)
-                            if (const auto *walls = dynamic_cast<const ExtrusionEntityCollection *>(entity))
-                                if (tools.wiping_extrusions().is_overriddable(*walls, print.config(), *object, region->region()))
-                                    for (size_t copy = 0; copy < object->instances().size(); ++copy)
-                                        CHECK(tools.wiping_extrusions().is_entity_overridden(walls, object, copy));
+                    for (const auto &candidate : layer->purge_inner_walls()) {
+                        const LayerRegion *region = candidate.region;
+                        const auto *walls = candidate.wall.collection;
+                        if (candidate.wall.is_shell())
+                            continue;
+                        if (!tools.wiping_extrusions().is_overriddable(*walls, print.config(), *object, region->region()))
+                            continue;
+                        for (size_t copy = 0; copy < object->instances().size(); ++copy)
+                            CHECK(tools.wiping_extrusions().is_entity_overridden(walls, object, copy));
+                    }
     }
     CHECK(purged_support_loops > 0);
     CHECK(copies_differ);
@@ -224,7 +236,9 @@ TEST_CASE("Supports absorb residual purge after model walls and grow past two lo
                 region.reset();
                 if (grown_volume > region.collection()->total_volume() + EPSILON) {
                     ++grown_regions;
-                    CHECK(loops > 2);
+                    // No native wall reservation anymore: the grown stack takes
+                    // over the outer wall too.
+                    CHECK(loops > 0);
                 }
             }
     CHECK(grown_regions > 0);
@@ -352,4 +366,41 @@ TEST_CASE("Protected purge transitions stay blocked with inner-wall mode on or o
     config.filament_soluble.values = {old_soluble, new_soluble};
     const bool expected = !old_soluble && !new_soluble && !old_support && !new_support;
     CHECK(WipingExtrusions::can_purge(config, 0, 1) == expected);
+}
+
+TEST_CASE("Grown support walls never print in mid air", "[PurgeSupport][PurgeIntoInnerWalls][Regression]")
+{
+    const char *style = GENERATE("normal", "tree_hybrid");
+    CAPTURE(style);
+    Model model;
+    Print print;
+    const auto config = support_purge_config(style, 60.);
+    init_support_purge(print, model, config, true);
+    print.process();
+    REQUIRE(support_overrides(print) > 0);
+    size_t grown_regions = 0;
+    for (const PrintObject *object : print.objects()) {
+        const auto layers = object->support_layers();
+        std::vector<std::pair<BoundingBox, size_t>> above;
+        for (size_t layer_idx = layers.size(); layer_idx-- > 0;) {
+            const SupportLayer *layer = layers[layer_idx];
+            for (const auto &region : layer->purge_support_regions) {
+                const BoundingBox region_box = region.bbox();
+                // Degenerate regions carry no walls and are best effort too.
+                if (!region_box.defined)
+                    continue;
+                // Every region must carry at least as many walls as every
+                // overlapping grown region above it.
+                for (const auto &[upper_box, upper_rings] : above)
+                    if (region_box.overlap(upper_box))
+                        CHECK(region.grown_rings() >= upper_rings);
+            }
+            for (const auto &region : layer->purge_support_regions)
+                if (region.grown_rings() > 0) {
+                    ++grown_regions;
+                    above.emplace_back(region.bbox(), region.grown_rings());
+                }
+        }
+    }
+    CHECK(grown_regions > 0);
 }

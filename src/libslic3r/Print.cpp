@@ -5589,6 +5589,48 @@ void Print::_plan_purge_into_inner_walls()
         }
     }
 
+    // Downward wall-count propagation for the grown support walls: a wall
+    // grown on a support layer prints in mid air if the layers below do not
+    // carry at least as many walls. Walk each object's support base layers top
+    // to bottom; every region still has to reach the ring count of the most
+    // demanding grown region above that overlaps it. The extra walls are not
+    // purge capacity, they exist to carry the grown walls above, so they are
+    // added before the allocation below can claim any support path. Best
+    // effort: regions that run solid cannot grow further. The grown state of a region is global and monotonic, so identical
+    // slicings sharing a support layer can safely walk it again: an already
+    // satisfied requirement is a no-op there, and a requirement that only
+    // exists because of the other object's taller unshared stack above still
+    // has to lift this layer.
+    for (PrintObject *object : m_objects) {
+        SupportLayerPtrs &object_support_layers = object->support_layers();
+        std::vector<std::pair<BoundingBox, size_t>> grown_above;
+        for (size_t layer_idx = object_support_layers.size(); layer_idx-- > 0;) {
+            SupportLayer *layer = object_support_layers[layer_idx];
+            for (SupportLayer::PurgeRegion &region : layer->purge_support_regions) {
+                if (grown_above.empty())
+                    continue;
+                const BoundingBox region_box = region.bbox();
+                if (!region_box.defined)
+                    continue;
+                size_t required = region.grown_rings();
+                for (const auto &[upper_box, upper_rings] : grown_above)
+                    if (region_box.overlap(upper_box))
+                        required = std::max(required, upper_rings);
+                if (required > region.grown_rings())
+                    region.grow_to_ring_count(required);
+                this->throw_if_canceled();
+            }
+            for (const SupportLayer::PurgeRegion &region : layer->purge_support_regions) {
+                if (region.grown_rings() == 0)
+                    continue;
+                const BoundingBox region_box = region.bbox();
+                if (!region_box.defined)
+                    continue;
+                grown_above.emplace_back(region_box, region.grown_rings());
+            }
+        }
+    }
+
     float  total_leftover       = 0.f;
     float  worst_layer_leftover = 0.f;
     double worst_layer_z        = 0.;
