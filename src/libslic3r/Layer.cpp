@@ -26,6 +26,7 @@
 #include <memory>
 #include <optional>
 #include <limits>
+#include <cmath>
 #include "Config.hpp"
 #include "MultiMaterialSegmentation.hpp"
 #include "ObjectID.hpp"
