@@ -696,7 +696,13 @@ double SupportLayer::PurgeRegion::grow_impl(double target_volume, size_t min_rin
 {
     const double infinity = std::numeric_limits<double>::infinity();
     const double original_volume = m_paths->total_volume();
+    // Printed filament, i.e. what grow()/grow_to_ring_count() report to the
+    // caller. The acceptance decision below may add a lift credit on top of
+    // this; credit never leaks into the reported volume or the demand baseline.
     double volume = original_volume;
+    // Acceptance baseline: identical to `volume` on the demand path, while the
+    // lift path accumulates the consumed-loop credit here.
+    double accept_volume = original_volume;
     const double spacing = m_flow.scaled_spacing();
     ExPolygons loop_areas = offset_ex(m_areas, -0.5 * spacing);
     ExtrusionEntityCollection walls;
@@ -747,16 +753,18 @@ double SupportLayer::PurgeRegion::grow_impl(double target_volume, size_t min_rin
         for_each_extrusion_path(m_original ? *m_original : *m_paths, [&](const ExtrusionPath &path) {
             path.subtract_expolygons(wall_band, &candidate);
         });
-        double candidate_volume = candidate.total_volume();
+        const double candidate_volume = candidate.total_volume();
+        double for_accept = candidate_volume;
         if (min_rings > 0)
-            candidate_volume += consumed_loops_volume(wall_band);
+            for_accept += consumed_loops_volume(wall_band);
         // Dense first layers or narrow branches may already have as much
         // capacity as these loops. Never reduce their existing capacity.
-        if (candidate_volume > volume + EPSILON) {
+        if (for_accept > accept_volume + EPSILON) {
             // Save the native paths only on accepted growth, transferring
             // ownership instead of deep-copying paths we are about to replace.
             if (!m_original)
                 m_original = std::make_unique<ExtrusionEntityCollection>(std::move(*m_paths));
+            accept_volume = for_accept;
             volume = candidate_volume;
             m_paths->swap(candidate);
             m_grown_rings = std::max(m_grown_rings, wall_count);
