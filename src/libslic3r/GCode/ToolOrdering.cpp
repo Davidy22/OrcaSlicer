@@ -3674,6 +3674,11 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                                                       b.matches_outer_wall, b.inset_idx, b.is_existing, b.volume);
         });
 
+        // Phase 1: model inner walls, ranked exactly as wall_priority() orders
+        // them. Purge requesting the color a region already prints on its
+        // exterior is served first (it cannot discolor anything) and takes the
+        // loop nearest that exterior, so a matching wall never has to be grown
+        // beyond the user's wall_loops just to be usable.
         for (const auto& cand : candidates) {
             if (remaining <= 0.f)
                 break;
@@ -3705,8 +3710,11 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
             purge_consumed += consumed;
         }
 
-        // Model inner walls are always exhausted before support paths, even
-        // when a support-bearing object has the per-object priority checkbox.
+        // Phase 2: support walls and fill, only for volume phase 1 could not
+        // place in any model inner wall of the layer (every object, including
+        // objects with the priority checkbox). A support that happens to print
+        // in the purge filament's color never promotes itself above a model
+        // wall: color only orders interior candidates against each other.
         // Allocate leaves, not an entire support layer: different changes and
         // copies may need different purge filaments; unclaimed paths stay native.
         for (const PrintObject *object : purge_object_list) {

@@ -321,6 +321,42 @@ TEST_CASE("Support replanning grows only for residual demand and disabling purge
             CHECK(support->purge_support_regions.empty());
 }
 
+TEST_CASE("Only objects eligible for extra model walls grow extra support walls", "[PurgeSupport][PurgeIntoInnerWalls][Regression]")
+{
+    const char *style = GENERATE("normal", "tree_hybrid", "organic");
+    CAPTURE(style);
+
+    // Count support regions grown for purge. reset() restores the native paths,
+    // so a region that grew is larger than itself afterwards.
+    const auto grown_support_regions = [](const Print &print, size_t object_idx) {
+        size_t grown = 0;
+        for (SupportLayer *support : print.objects()[object_idx]->support_layers())
+            for (auto &region : support->purge_support_regions) {
+                const double grown_volume = region.collection()->total_volume();
+                region.reset();
+                if (grown_volume > region.collection()->total_volume() + EPSILON)
+                    ++grown;
+            }
+        return grown;
+    };
+
+    Model model;
+    Print print;
+    const auto config = support_purge_config(style, 60.);
+    init_support_purge(print, model, config);
+    print.process();
+    // Control: with no object prioritized, every object may grow support walls.
+    REQUIRE(grown_support_regions(print, 0) + grown_support_regions(print, 1) > 0);
+
+    // Prioritizing the first object must not leave its purge in the second
+    // object's grown support: that object's model walls were never allowed to
+    // grow, so growing its support would take purge its inner walls had room for.
+    model.objects.front()->config.set_key_value("purge_into_inner_walls_preferred", new ConfigOptionBool(true));
+    print.apply(model, config);
+    print.process();
+    CHECK(grown_support_regions(print, 1) == 0);
+}
+
 TEST_CASE("Protected material changes do not add a fictitious purge transition", "[PurgeSupport][PurgeIntoInnerWalls][Regression]")
 {
     Model model;

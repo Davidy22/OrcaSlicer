@@ -672,27 +672,47 @@ void PrintObject::make_perimeters()
         if (grow_here) {
             const float num_copies = float(num_instances);
 
-            // Filaments printing on a layer, from the region filament
-            // assignments (1-based ids -> 0-based matrix indices, like
+            // Filaments printing on a layer, in printing order, from the region
+            // filament assignments (1-based ids -> 0-based matrix indices, like
             // LayerTools::wall_extruder_id()). ToolOrdering::collect_extruders
             // cannot be used here: it reads generated toolpaths.
-            auto layer_filaments = [](const Layer *layer) {
-                std::set<unsigned int> filaments;
+            //
+            // Order matters because the flush matrix is directional and because
+            // a three-color layer is not necessarily printed in sorted order: a
+            // sorted set walks 0->1->2 while the printer may really go 0->2->1,
+            // so the expensive pair is never counted and the walls are sized for
+            // the wrong transitions. The unabsorbed volume then lands in support
+            // walls, which are grown afterwards from the exact toolordering
+            // demand - purge ends up in support even though the model still had
+            // room for more loops. Keep the colors in first-appearance order, one
+            // entry each, so the transition count matches the sorted walk but the
+            // pairs follow the real print order.
+            auto layer_filament_sequence = [](const Layer *layer) {
+                std::vector<unsigned int> filaments;
                 if (layer == nullptr)
                     return filaments;
+                const auto add_filament = [&filaments](int filament_id) {
+                    if (filament_id <= 0)
+                        return;
+                    const auto filament = (unsigned int) (filament_id - 1);
+                    if (std::find(filaments.begin(), filaments.end(), filament) == filaments.end())
+                        filaments.emplace_back(filament);
+                };
                 for (const LayerRegion *layerm : layer->regions()) {
                     if (layerm->slices.empty())
                         continue;
                     const PrintRegionConfig &rcfg = layerm->region().config();
-                    auto add_filament = [&filaments](int filament_id) {
-                        if (filament_id > 0)
-                            filaments.insert((unsigned int) (filament_id - 1));
-                    };
+                    if (rcfg.is_infill_first.value) {
+                        add_filament(rcfg.sparse_infill_filament_id.value);
+                        add_filament(rcfg.internal_solid_filament_id.value);
+                    }
                     add_filament(rcfg.outer_wall_filament_id.value);
                     if (rcfg.wall_loops.value > 1)
                         add_filament(rcfg.inner_wall_filament_id.value);
-                    add_filament(rcfg.sparse_infill_filament_id.value);
-                    add_filament(rcfg.internal_solid_filament_id.value);
+                    if (!rcfg.is_infill_first.value) {
+                        add_filament(rcfg.sparse_infill_filament_id.value);
+                        add_filament(rcfg.internal_solid_filament_id.value);
+                    }
                     add_filament(rcfg.top_surface_filament_id.value);
                     add_filament(rcfg.bottom_surface_filament_id.value);
                 }
@@ -725,10 +745,18 @@ void PrintObject::make_perimeters()
                         // marked).
                         if (object->config().purge_into_inner_walls_preferred.getBool() || !any_preferred)
                             ++preferred_count;
-                        for (const unsigned int filament : layer_filaments(layer)) {
+                        for (const unsigned int filament : layer_filament_sequence(layer)) {
                             if (prev_filament >= 0 && (int) filament != prev_filament
                                 && WipingExtrusions::can_purge(purge_cfg, (unsigned int) prev_filament, filament)) {
-                                const float volume = estimate_flush_volume(purge_cfg, (unsigned int) prev_filament, filament);
+                                // The flush matrix is directional and this
+                                // sequence only approximates the real toolpath
+                                // order, so size the walls for the more
+                                // expensive direction. Over-estimating costs
+                                // extra native walls; under-estimating would
+                                // hand the volume to support instead.
+                                const float volume = std::max(
+                                    estimate_flush_volume(purge_cfg, (unsigned int) prev_filament, filament),
+                                    estimate_flush_volume(purge_cfg, filament, (unsigned int) prev_filament));
                                 layer_demand += volume;
                                 demand_by_filament[layer_idx][filament] += volume;
                             }

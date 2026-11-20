@@ -51,12 +51,17 @@ inline std::optional<Point> seam_point(const Points &polygon, double fraction,
     return last_point; // accumulated rounding at fraction 1
 }
 
-// Larger keys are allocated first: preferred objects, then the largest loop
-// volumes. Color, depth and existing capacity only break equal-volume ties;
-// native exterior/shield protection is enforced before this ranking.
+// Larger keys are allocated first: preferred objects, then walls whose region
+// prints in the purge filament's own color, then the largest loop volumes.
+// A color match is not merely a tie-breaker: purge placed in a region whose
+// exterior is the same color cannot discolor anything, so that region should be
+// consumed before a foreign region loses its native walls. Within a tier the
+// closest loop to the exterior wins for a match (the exterior color continues
+// through it) while a foreign region is consumed from the inside out.
+// Native exterior/shield protection is enforced before this ranking.
 inline auto wall_priority(bool preferred, bool matches_outer_wall, int inset_idx, bool existing, float volume)
 {
-    return std::make_tuple(preferred, volume, matches_outer_wall, matches_outer_wall ? -inset_idx : inset_idx, existing);
+    return std::make_tuple(preferred, matches_outer_wall, volume, matches_outer_wall ? -inset_idx : inset_idx, existing);
 }
 
 // WipeTower2's purge ramp, in mm/s rather than its writer's mm/min. Advance once
