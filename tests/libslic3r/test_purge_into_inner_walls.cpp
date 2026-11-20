@@ -226,6 +226,41 @@ TEST_CASE("Purge flush volume estimate", "[PurgeIntoInnerWalls]")
     REQUIRE_THAT(estimate_flush_volume(config, 0, 1), Catch::Matchers::WithinAbs(42., 1e-4));
 }
 
+// The estimate decides how much a purge target is asked to absorb, so it has to
+// read the same multiplier the prime tower and ToolOrdering's flush matrices do.
+// Fast purge mode carries its own flush_multiplier_fast; every other mode keeps
+// the default one, and an unset fast vector must not be read out of bounds.
+TEST_CASE("Purge flush volume estimate follows the prime volume mode", "[PurgeIntoInnerWalls]")
+{
+    PrintConfig config = PrintConfig::defaults();
+    config.nozzle_diameter.values.assign(1, 0.4);
+    config.flush_volumes_matrix.values            = { 0., 100., 200., 0. };
+    config.flush_multiplier.values                = { 2.0 };
+    config.flush_multiplier_fast.values           = { 0.5 };
+    config.prime_volume.value                     = 42.;
+    config.purge_in_prime_tower.value             = true;
+    config.single_extruder_multi_material.value   = true;
+
+    // Default mode is inert: the fast vector is ignored.
+    config.prime_volume_mode.value = PrimeVolumeMode::pvmDefault;
+    REQUIRE_THAT(estimate_flush_volume(config, 0, 1), Catch::Matchers::WithinAbs(200., 1e-4));
+
+    // Saving mode reduces the prime volume, but this estimate only feeds the
+    // flush matrix, which keeps the default multiplier.
+    config.prime_volume_mode.value = PrimeVolumeMode::pvmSaving;
+    REQUIRE_THAT(estimate_flush_volume(config, 0, 1), Catch::Matchers::WithinAbs(200., 1e-4));
+
+    // Fast mode swaps in flush_multiplier_fast instead of the default.
+    config.prime_volume_mode.value = PrimeVolumeMode::pvmFast;
+    REQUIRE_THAT(estimate_flush_volume(config, 0, 1), Catch::Matchers::WithinAbs(50., 1e-4));
+    REQUIRE_THAT(estimate_flush_volume(config, 1, 0), Catch::Matchers::WithinAbs(100., 1e-4));
+
+    // A half-migrated profile can leave the fast vector empty; fall back to the
+    // default multiplier instead of reading index 0 out of bounds.
+    config.flush_multiplier_fast.values.clear();
+    REQUIRE_THAT(estimate_flush_volume(config, 0, 1), Catch::Matchers::WithinAbs(200., 1e-4));
+}
+
 TEST_CASE("Purge seam samples follow loop arc length rather than vertex indices", "[PurgeIntoInnerWalls][Regression]")
 {
     const Points rectangle{Point::new_scale(0., 0.), Point::new_scale(20., 0.),

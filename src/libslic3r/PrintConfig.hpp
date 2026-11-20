@@ -2771,6 +2771,9 @@ static std::vector<T> get_flush_volumes_matrix(const std::vector<T> &fv_matrix, 
 // multi-material with purging volumes enabled, plain prime volume otherwise.
 // For multi-nozzle printers the first nozzle's matrix is used. Filament ids are
 // zero-based matrix indices, as in LayerTools::extruders.
+// The multiplier follows prime_volume_mode, which is what the prime tower and
+// ToolOrdering's flush matrices already do: fast purge mode reads
+// flush_multiplier_fast, every other mode keeps the default multiplier.
 inline float estimate_flush_volume(const PrintConfig &config, unsigned int from_filament, unsigned int to_filament)
 {
     if (from_filament == to_filament)
@@ -2786,7 +2789,13 @@ inline float estimate_flush_volume(const PrintConfig &config, unsigned int from_
     if (num_filaments == 0 || size_t(num_filaments) * num_filaments != matrix_size
         || from_filament >= num_filaments || to_filament >= num_filaments)
         return (float) config.prime_volume;
-    return float(matrix[from_filament * num_filaments + to_filament]) * (float) config.flush_multiplier.get_at(0);
+    // A half-migrated profile can carry an empty fast vector; fall back to the
+    // default multiplier rather than reading index 0 out of bounds.
+    const std::vector<double> &fast = config.flush_multiplier_fast.values;
+    const float multiplier = (config.prime_volume_mode == PrimeVolumeMode::pvmFast && !fast.empty())
+        ? (float) config.flush_multiplier_fast.get_at(0)
+        : (float) config.flush_multiplier.get_at(0);
+    return float(matrix[from_filament * num_filaments + to_filament]) * multiplier;
 }
 
 // std::vector<double> &out_matrix:

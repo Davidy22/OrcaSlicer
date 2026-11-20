@@ -1511,6 +1511,16 @@ private:
     // wall loops without generating a prime tower (has_wipe_tower() is false
     // in this mode, so _make_wipe_tower() never runs). Mirrors _plan_belt_purge().
     void                _plan_purge_into_inner_walls();
+    // Walk the tool ordering and hand each toolchange's purge demand to the
+    // layer's WipingExtrusions. Returns the volume each layer failed to absorb,
+    // aligned with layer_tools().
+    // Shared by _plan_belt_purge() and _plan_purge_into_inner_walls() so both
+    // derive demand identically (flush matrix x multiplier, fast-purge mode
+    // included) instead of each keeping its own copy. Both callers start from a
+    // freshly built m_wipe_tower_data.tool_ordering, and neither can run in the
+    // same apply (belt mode takes the prism path), so the per-layer
+    // WipingExtrusions state this mutates is never shared.
+    std::vector<float>  _wipe_purge_at_toolchanges();
     bool                invalidate_purge_wall_demand();
     // Belt mode: shift the purge prism's layer grid to match the printed
     // objects' grid so toolchange layers find prism layers to purge into.

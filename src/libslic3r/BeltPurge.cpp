@@ -159,8 +159,6 @@ void Print::_plan_belt_purge()
     // layers coincide with the toolchange layers.
     this->_align_belt_purge_layers();
 
-    const unsigned int number_of_extruders = (unsigned int) m_config.filament_colour.values.size();
-
     // No initial priming extrusions: there is no tower to prime on.
     m_wipe_tower_data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, false);
     m_wipe_tower_data.tool_ordering.sort_and_build_data(*this, (unsigned int) -1, false);
@@ -182,18 +180,6 @@ void Print::_plan_belt_purge()
     }
 
     this->throw_if_canceled();
-
-    // Flush volumes per filament pair, mirroring the generic wipe tower path:
-    // full flush matrix for single extruder multi material with purging enabled,
-    // plain prime volume otherwise.
-    std::vector<float> flush_matrix(cast<float>(
-        get_flush_volumes_matrix(m_config.flush_volumes_matrix.values, 0, m_config.nozzle_diameter.values.size())));
-    std::vector<std::vector<float>> wipe_volumes;
-    for (unsigned int i = 0; i < number_of_extruders; ++i)
-        wipe_volumes.push_back(std::vector<float>(flush_matrix.begin() + i * number_of_extruders,
-                                                  flush_matrix.begin() + (i + 1) * number_of_extruders));
-    const bool  use_flush_matrix = m_config.purge_in_prime_tower && m_config.single_extruder_multi_material;
-    const float flush_multiplier = (float) m_config.flush_multiplier.get_at(0);
 
     // Cancel the purge prism early: pre-scan the tool ordering for the highest
     // print_z that actually has a toolchange, then drop the prism's layers above
@@ -259,20 +245,13 @@ void Print::_plan_belt_purge()
     float  worst_layer_leftover = 0.f;
     double worst_layer_z       = 0.;
 
-    unsigned int current_extruder_id = m_wipe_tower_data.tool_ordering.first_extruder();
+    // Shared with _plan_purge_into_inner_walls(): one derivation of the demand
+    // (flush matrix x multiplier, fast-purge mode included) for both modes.
+    const std::vector<float> layer_leftovers = this->_wipe_purge_at_toolchanges();
+    size_t layer_idx = 0;
     for (auto &layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) {
-        float layer_leftover = 0.f;
-        for (const unsigned int extruder_id : layer_tools.extruders) {
-            if (extruder_id == current_extruder_id)
-                continue;
-            float volume_to_wipe = use_flush_matrix ?
-                wipe_volumes[current_extruder_id][extruder_id] * flush_multiplier :
-                (float) m_config.prime_volume;
-            float leftover = layer_tools.wiping_extrusions().mark_wiping_extrusions(*this, current_extruder_id, extruder_id,
-                                                                                    volume_to_wipe, m_tool_ordering.m_stats_by_single_extruder);
-            layer_leftover += leftover;
-            current_extruder_id = extruder_id;
-        }
+        const float layer_leftover = layer_idx < layer_leftovers.size() ? layer_leftovers[layer_idx] : 0.f;
+        ++ layer_idx;
 
         // Plastic saving: drop the prism's fills that no toolchange on this layer
         // claimed. At this point the prism's OVERRIDDEN fills are exactly the

@@ -5904,6 +5904,36 @@ void Print::_make_wipe_tower()
     }
 }
 
+// Walk the tool ordering and hand each toolchange's purge demand to the layer's
+// WipingExtrusions, returning the volume that no purge target absorbed.
+// Single source of truth for the belt purge prism and purge-into-inner-walls:
+// both used to carry their own copy of this loop, and the copies drift apart
+// (the belt one hand-rolled its own flush multiplier, so it ignored fast-purge
+// mode and under-absorbed, which desynchronized the plans the two modes build).
+// Both callers start from a freshly built m_wipe_tower_data.tool_ordering, and
+// neither runs in the same apply (belt mode takes the prism path instead of
+// this planner), so the per-layer WipingExtrusions state mutated here is never
+// shared between two passes over the same layers.
+std::vector<float> Print::_wipe_purge_at_toolchanges()
+{
+    std::vector<float> layer_leftovers;
+    layer_leftovers.reserve(m_wipe_tower_data.tool_ordering.layer_tools().size());
+    unsigned int current_extruder_id = m_wipe_tower_data.tool_ordering.first_extruder();
+    for (auto &layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) {
+        float layer_leftover = 0.f;
+        for (const unsigned int extruder_id : layer_tools.extruders) {
+            if (extruder_id == current_extruder_id)
+                continue;
+            const float volume_to_wipe = estimate_flush_volume(m_config, current_extruder_id, extruder_id);
+            layer_leftover += layer_tools.wiping_extrusions().mark_wiping_extrusions(
+                *this, current_extruder_id, extruder_id, volume_to_wipe, m_tool_ordering.m_stats_by_single_extruder);
+            current_extruder_id = extruder_id;
+        }
+        layer_leftovers.emplace_back(layer_leftover);
+    }
+    return layer_leftovers;
+}
+
 // Purge into inner walls: route filament-change purging into the tagged inner
 // wall loops instead of a prime tower. has_wipe_tower() is false in this mode
 // (normalize_fdm disables the prime tower), so _make_wipe_tower() never runs
@@ -5924,14 +5954,28 @@ void Print::_plan_purge_into_inner_walls()
                 // Generators register direct child groups. A pipeline hook may
                 // replace/regroup those paths: discard stale growth metadata
                 // rather than dereferencing a collection it no longer owns.
-                const std::unordered_set<const ExtrusionEntity *> groups(
-                    support->support_fills.entities.begin(), support->support_fills.entities.end());
+                // Test the first registered region only: it was registered
+                // against the original support_fills.entities buffer, so its
+                // address identifies the allocation to validate. A region
+                // registered after that vector grew points into the live buffer,
+                // moves on the next grow() and cannot dangle -- testing it would
+                // discard healthy growth state on every replan.
                 auto &regions = support->purge_support_regions;
-                regions.erase(std::remove_if(regions.begin(), regions.end(), [&](const SupportLayer::PurgeRegion &region) {
-                    return groups.count(region.collection()) == 0;
-                }), regions.end());
-                for (SupportLayer::PurgeRegion &region : regions)
-                    region.reset();
+                if (!regions.empty()) {
+                    const std::unordered_set<const ExtrusionEntity *> groups(
+                        support->support_fills.entities.begin(), support->support_fills.entities.end());
+                    if (groups.count(regions.front().collection()) == 0)
+                        // The group this layer grew is gone (regenerated or
+                        // regrouped upstream, e.g. posSupportMaterial re-running
+                        // alone). Every region's m_paths dangles and reset()
+                        // would swap through it. Drop the growth state instead
+                        // of touching it: the grown entities die with the old
+                        // geometry they belonged to.
+                        regions.clear();
+                    else
+                        for (SupportLayer::PurgeRegion &region : regions)
+                            region.reset();
+                }
             }
 
     // No initial priming extrusions: there is no tower to prime on.
@@ -6038,18 +6082,12 @@ void Print::_plan_purge_into_inner_walls()
     float  worst_layer_leftover = 0.f;
     double worst_layer_z        = 0.;
 
-    unsigned int current_extruder_id = m_wipe_tower_data.tool_ordering.first_extruder();
+    // Same demand derivation (and the same marking) the belt purge prism uses.
+    const std::vector<float> layer_leftovers = this->_wipe_purge_at_toolchanges();
+    size_t layer_idx = 0;
     for (auto &layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) {
-        float layer_leftover = 0.f;
-        for (const unsigned int extruder_id : layer_tools.extruders) {
-            if (extruder_id == current_extruder_id)
-                continue;
-            const float volume_to_wipe = estimate_flush_volume(m_config, current_extruder_id, extruder_id);
-            float leftover = layer_tools.wiping_extrusions().mark_wiping_extrusions(*this, current_extruder_id, extruder_id,
-                                                                                    volume_to_wipe, m_tool_ordering.m_stats_by_single_extruder);
-            layer_leftover += leftover;
-            current_extruder_id = extruder_id;
-        }
+        const float layer_leftover = layer_idx < layer_leftovers.size() ? layer_leftovers[layer_idx] : 0.f;
+        ++ layer_idx;
 
         layer_tools.wiping_extrusions().ensure_perimeters_infills_order(*this);
         if (layer_leftover > 0.f) {
