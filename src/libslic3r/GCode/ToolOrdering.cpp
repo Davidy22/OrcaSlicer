@@ -3532,7 +3532,9 @@ int WipingExtrusions::get_native_extruder_override(const ExtrusionEntity* entity
 float WipingExtrusions::purge_capacity(const Print& print, unsigned int initial_extruder) const
 {
     float capacity = 0.f;
-    std::map<unsigned int, float> shell_capacity;
+    // Shell loops are credited after the demand is known: each one absorbs the
+    // color it already prints first and only then its region's exterior color.
+    std::vector<std::tuple<unsigned int, unsigned int, float>> shell_loops;
     for (const PrintObject *object : print.objects()) {
         const float copies = float(object->instances().size());
         if (const Layer *layer = object->get_layer_at_printz(m_layer_tools->print_z, EPSILON))
@@ -3542,7 +3544,8 @@ float WipingExtrusions::purge_capacity(const Print& print, unsigned int initial_
                     continue;
                 const float volume = float(wall.collection->total_volume()) * copies;
                 if (wall.is_shell())
-                    shell_capacity[m_layer_tools->wall_extruder_id(candidate.region->region())] += volume;
+                    shell_loops.emplace_back(m_layer_tools->extruder(*wall.collection, candidate.region->region()),
+                                             m_layer_tools->wall_extruder_id(candidate.region->region()), volume);
                 else
                     capacity += volume;
             }
@@ -3552,18 +3555,21 @@ float WipingExtrusions::purge_capacity(const Print& print, unsigned int initial_
                     capacity += float(entity.total_volume()) * copies;
             });
     }
-    // The reserved shell can itself absorb purge of its exterior filament.
-    // Credit only that filament's requested volume, never the same space for
-    // foreign purge. In particular a thin, solid region may lose ALL foreign
-    // capacity when its sole inner wall becomes the native shell.
+    // The reserved shell can itself absorb purge of the color it already
+    // prints - its own filament, which for an inner wall may differ from the
+    // exterior - and of its region's exterior filament, hidden behind a
+    // boundary of that color. Credit only those colors' requested volume, never
+    // the same space for foreign purge, and never twice for the same loop: in
+    // particular a thin, solid region may lose ALL foreign capacity when its
+    // sole inner wall becomes the native shell.
     std::map<unsigned int, float> matching_demand;
     for (const unsigned int extruder : m_layer_tools->extruders) {
         if (can_purge(print.config(), initial_extruder, extruder))
             matching_demand[extruder] += estimate_flush_volume(print.config(), initial_extruder, extruder);
         initial_extruder = extruder;
     }
-    for (const auto &[extruder, volume] : shell_capacity)
-        capacity += std::min(volume, matching_demand[extruder]);
+    for (const auto &[own, outer, volume] : shell_loops)
+        capacity += PurgeIntoInnerWalls::credit_shell_volume(own, outer, volume, matching_demand);
     return capacity;
 }
 
@@ -3634,7 +3640,7 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
             std::vector<const ExtrusionEntityCollection *> shells;
             unsigned int copy;
             int inset_idx;
-            bool matches_outer_wall;
+            bool matches_purge_color;
             bool is_existing;
             bool preferred;
             float volume;
@@ -3658,16 +3664,24 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                 if (!is_overriddable(*coll, print.config(), *object, layerm->region()))
                     continue;
 
-                // Matching purge already supplies a native inner wall.
-                // A foreign change may only use the walls behind it.
+                // A wall that already prints the purge color needs no color
+                // change at all: it can carry the flush wherever it sits, and
+                // its volume is then subtracted from what is still to place.
+                // That is the inner-wall filament, which may differ from the
+                // region's exterior. Matching purge also supplies a native
+                // inner wall, so a shell loop may be recolored when its region
+                // prints the purge color on the exterior; a foreign change may
+                // only use the walls behind it.
+                const bool matches_own_color  = lt.extruder(*coll, layerm->region()) == new_extruder;
                 const bool matches_outer_wall = lt.wall_extruder_id(layerm->region()) == new_extruder;
-                if (wall.is_shell() && !matches_outer_wall)
+                const bool matches_purge_color = matches_own_color || matches_outer_wall;
+                if (wall.is_shell() && !matches_purge_color)
                     continue;
                 const int inset_idx = coll->get_max_inset_idx();
                 const bool is_existing = coll->is_existing_purge_wall();
                 const float wall_volume = static_cast<float>(coll->total_volume());
                 for (unsigned int copy = 0; copy < num_of_copies; ++copy)
-                    candidates.push_back({coll, object, layerm, wall.shells, copy, inset_idx, matches_outer_wall,
+                    candidates.push_back({coll, object, layerm, wall.shells, copy, inset_idx, matches_purge_color,
                                           is_existing, preferred, wall_volume});
             }
         }
@@ -3678,12 +3692,12 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         // walls by ascending volume. Equal keys keep deterministic object/copy
         // order and shell reuse.
         std::stable_sort(candidates.begin(), candidates.end(), [](const PurgeCandidate& a, const PurgeCandidate& b) {
-            const auto a_tier = PurgeIntoInnerWalls::wall_tier(a.preferred, a.matches_outer_wall);
-            const auto b_tier = PurgeIntoInnerWalls::wall_tier(b.preferred, b.matches_outer_wall);
+            const auto a_tier = PurgeIntoInnerWalls::wall_tier(a.preferred, a.matches_purge_color);
+            const auto b_tier = PurgeIntoInnerWalls::wall_tier(b.preferred, b.matches_purge_color);
             if (a_tier != b_tier)
                 return a_tier > b_tier;
-            return PurgeIntoInnerWalls::wall_before(a.matches_outer_wall, a.inset_idx, a.is_existing, a.volume,
-                                                    b.matches_outer_wall, b.inset_idx, b.is_existing, b.volume);
+            return PurgeIntoInnerWalls::wall_before(a.matches_purge_color, a.inset_idx, a.is_existing, a.volume,
+                                                    b.matches_purge_color, b.inset_idx, b.is_existing, b.volume);
         });
 
         // Phase 1: model inner walls. Tiers run in wall_tier() order, so purge
@@ -3721,11 +3735,11 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
 
         for (size_t tier_begin = 0; remaining > 0.f && tier_begin < candidates.size();) {
             const auto tier_key = PurgeIntoInnerWalls::wall_tier(candidates[tier_begin].preferred,
-                                                                candidates[tier_begin].matches_outer_wall);
+                                                                candidates[tier_begin].matches_purge_color);
             size_t tier_end = tier_begin;
             while (tier_end < candidates.size() &&
                    PurgeIntoInnerWalls::wall_tier(candidates[tier_end].preferred,
-                                                  candidates[tier_end].matches_outer_wall) == tier_key)
+                                                  candidates[tier_end].matches_purge_color) == tier_key)
                 ++tier_end;
 
             // Claimed loops are dropped from this list, which stays in

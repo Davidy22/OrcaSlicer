@@ -14,6 +14,7 @@
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/libslic3r.h"
 
+#include <map>
 #include <vector>
 #include <algorithm>
 #include <cstddef>
@@ -447,6 +448,34 @@ TEST_CASE("Purge fills the smallest foreign wall that absorbs the remainder", "[
     CHECK(pick_volume_fit(3, volumes({2.f, 5.f, 40.f}), 40.5f) == 2);
     // No candidates left.
     CHECK(pick_volume_fit(0, volumes({}), 10.f) == 0);
+}
+
+TEST_CASE("A shell loop absorbs the color it already prints before its exterior color", "[PurgeIntoInnerWalls][Regression]")
+{
+    using PurgeIntoInnerWalls::credit_shell_volume;
+    using Catch::Matchers::WithinAbs;
+
+    // The own color is credited first: that loop needs no color change at all.
+    std::map<unsigned int, float> demand{{0u, 40.f}, {1u, 30.f}};
+    CHECK_THAT(credit_shell_volume(0u, 1u, 20.f, demand), WithinAbs(20., 1e-6));
+    CHECK_THAT(demand[0], WithinAbs(20., 1e-6));
+    CHECK_THAT(demand[1], WithinAbs(30., 1e-6));
+    // Only what the own color cannot take spills into the exterior color, so one
+    // physical loop is never counted twice when both colors are on the layer.
+    CHECK_THAT(credit_shell_volume(0u, 1u, 30.f, demand), WithinAbs(30., 1e-6));
+    CHECK_THAT(demand[0], WithinAbs(0., 1e-6));
+    CHECK_THAT(demand[1], WithinAbs(20., 1e-6));
+
+    // An inner-wall filament equal to the exterior appears once, not twice.
+    std::map<unsigned int, float> same{{2u, 25.f}};
+    CHECK_THAT(credit_shell_volume(2u, 2u, 40.f, same), WithinAbs(25., 1e-6));
+    CHECK_THAT(same[2], WithinAbs(0., 1e-6));
+
+    // No demand for either color, no volume, or a color missing from the layer.
+    std::map<unsigned int, float> exhausted{{0u, 0.f}};
+    CHECK_THAT(credit_shell_volume(0u, 1u, 10.f, exhausted), WithinAbs(0., 1e-6));
+    CHECK_THAT(credit_shell_volume(0u, 1u, 0.f, exhausted), WithinAbs(0., 1e-6));
+    CHECK_THAT(credit_shell_volume(5u, 6u, 10.f, exhausted), WithinAbs(0., 1e-6));
 }
 
 TEST_CASE("Purge wall speed ramps without exceeding existing speed or flow limits", "[PurgeIntoInnerWalls][Regression]")

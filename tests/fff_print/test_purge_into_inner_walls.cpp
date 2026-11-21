@@ -790,6 +790,88 @@ TEST_CASE("Purge claims the loop nearest a matching exterior before a smaller lo
             CHECK(wiping.get_extruder_override(entity, other, 0) < 0);
 }
 
+TEST_CASE("Purge reuses inner walls that already print the purge color", "[PurgeIntoInnerWalls][Regression]")
+{
+    const char *generator = GENERATE("classic", "arachne");
+    CAPTURE(generator);
+
+    // Outer walls print filament 1, the user's inner walls filament 2, so a
+    // change into filament 2 matches the walls' own color while the visible
+    // exterior stays a different color. Those walls need no color change at
+    // all, so they are purge capacity and their volume is subtracted from the
+    // flush that still has to be placed.
+    Model model;
+    Print print;
+    DynamicPrintConfig config = purge_config(generator, 4, false, 3);
+    // Region-level: every object keeps its own exterior filament but prints its
+    // inner walls in filament 2 (normalize_fdm only fills a 0, so the object
+    // "extruder" overrides below do not reset it).
+    config.set_deserialize_strict({{"prime_volume", 1.}, {"inner_wall_filament_id", 2}});
+    TriangleMesh first = make_cube(20., 20., 1.);
+    first.translate(40.f, 40.f, 0.f);
+    TriangleMesh second = make_cube(20., 20., 1.);
+    second.translate(80.f, 40.f, 0.f);
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
+        {{"extruder", 1}, {"purge_into_inner_walls_preferred", true}},
+        {{"extruder", 2}},
+    };
+    Test::init_print({first, second}, print, model, config, &overrides, false);
+    print.process();
+    REQUIRE(print.objects().size() == 2);
+    const PrintObject *preferred = print.objects().front();
+    REQUIRE(preferred->layers().size() > 1);
+    const Layer *layer = preferred->layers()[1];
+    REQUIRE(layer->regions().size() == 1);
+    const PrintRegion &region = layer->regions().front()->region();
+
+    LayerTools tools(layer->print_z);
+    tools.extruders = {1}; // the inner walls' own filament
+    WipingExtrusions &wiping = tools.wiping_extrusions();
+
+    const ExtrusionEntityCollection *nearest = nullptr;
+    int nearest_inset = std::numeric_limits<int>::max();
+    for (const auto &candidate : layer->purge_inner_walls()) {
+        if (!wiping.is_overriddable_and_mark(*candidate.wall.collection, print.config(), *preferred, candidate.region->region()))
+            continue;
+        if (candidate.wall.collection->get_max_inset_idx() < nearest_inset) {
+            nearest_inset = candidate.wall.collection->get_max_inset_idx();
+            nearest = candidate.wall.collection;
+        }
+    }
+    REQUIRE(nearest != nullptr);
+    REQUIRE(nearest_inset > 0);
+    // Premise: the exterior prints filament 1, the loop nearest the exterior
+    // prints filament 2 - the purge color of the change below.
+    REQUIRE(tools.wall_extruder_id(region) == 0);
+    REQUIRE(tools.extruder(*nearest, region) == 1);
+
+    FilamentChangeStats stats;
+    const float demand = float(0.75 * nearest->total_volume());
+    CHECK_THAT(wiping.mark_wiping_extrusions(print, 0, 1, demand, stats), Catch::Matchers::WithinAbs(0., 1e-5));
+
+    // The nearest loop is claimed even though it sits right behind a different
+    // exterior color: its own color already is the purge color, and its volume
+    // is subtracted from the flush, so a single loop absorbs the whole change.
+    CHECK(wiping.get_extruder_override(nearest, preferred, 0) == 1);
+    size_t claims = 0;
+    for (const ExtrusionEntity *entity : layer->regions().front()->perimeters.entities) {
+        const auto *wall = dynamic_cast<const ExtrusionEntityCollection *>(entity);
+        REQUIRE(wall != nullptr);
+        if (!wall->is_purge_inner_wall_candidate())
+            continue; // the visible exterior stays untouched
+        if (wiping.get_extruder_override(wall, preferred, 0) >= 0)
+            ++claims;
+    }
+    CHECK(claims == 1);
+    // The nonpreferred object's walls are not needed at all.
+    const PrintObject *other = print.objects()[1];
+    const Layer *other_layer = other->get_layer_at_printz(tools.print_z, EPSILON);
+    REQUIRE(other_layer != nullptr);
+    for (const LayerRegion *other_region : other_layer->regions())
+        for (const ExtrusionEntity *entity : other_region->perimeters.entities)
+            CHECK(wiping.get_extruder_override(entity, other, 0) < 0);
+}
+
 TEST_CASE("Only purged inner wall seams scatter across layers and copies", "[PurgeIntoInnerWalls][Regression]")
 {
     const char *generator = GENERATE("classic", "arachne");

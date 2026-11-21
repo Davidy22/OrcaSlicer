@@ -15,6 +15,7 @@
 #include "ClipperUtils.hpp"
 #include "ConnectedBodies.hpp"
 #include "Geometry.hpp"
+#include "GCode/PurgeIntoInnerWalls.hpp"
 #include "GCode/ToolOrdering.hpp"
 #include "I18N.hpp"
 #include "Layer.hpp"
@@ -775,25 +776,33 @@ void PrintObject::make_perimeters()
             std::vector<float> measured(m_layers.size(), 0.f);
             auto measure_layer = [this, num_copies, &demand_by_filament](size_t layer_idx) {
                 float volume = 0.f;
-                std::map<unsigned int, float> shell_volume;
+                // Purge walls are inner walls, so the color a shell loop already
+                // prints is the region's inner-wall filament, which may differ
+                // from its exterior. Map 1-based filament ids the way
+                // LayerTools::extruder()/wall_extruder_id() do (0 = the active
+                // filament, i.e. the first one), so capacity is credited to the
+                // same colors the allocator can actually claim.
+                const auto filament_index = [](int id) { return id > 0 ? unsigned(id - 1) : 0u; };
+                std::vector<std::tuple<unsigned int, unsigned int, float>> shell_loops;
                 for (const auto &candidate : m_layers[layer_idx]->purge_inner_walls()) {
                     const float capacity = float(candidate.wall.collection->total_volume()) * num_copies;
                     if (candidate.wall.is_shell()) {
-                        const unsigned int outer_filament = unsigned(candidate.region->region().config().outer_wall_filament_id.value - 1);
-                        shell_volume[outer_filament] += capacity;
+                        const PrintRegionConfig &rcfg = candidate.region->region().config();
+                        shell_loops.emplace_back(filament_index(rcfg.inner_wall_filament_id.value),
+                                                 filament_index(rcfg.outer_wall_filament_id.value), capacity);
                     } else
                         volume += capacity;
                 }
                 // Keep one native-color inner wall behind each visible boundary.
-                // Matching purge already supplies that wall; only the matching
-                // budget may credit its volume. Otherwise grow a replacement
-                // deeper inside, before infill, and include it in extra_loops so
-                // the ordinary downward support propagation also carries it.
-                for (const auto &[filament, capacity] : shell_volume) {
-                    const auto it = demand_by_filament[layer_idx].find(filament);
-                    if (it != demand_by_filament[layer_idx].end())
-                        volume += std::min(capacity, it->second);
-                }
+                // A shell loop absorbs the color it already prints first (no
+                // color change at all) and then its region's exterior color, so
+                // it is never credited twice for the same volume. Otherwise grow
+                // a replacement deeper inside, before infill, and include it in
+                // extra_loops so the ordinary downward support propagation also
+                // carries it.
+                std::map<unsigned int, float> demand_left = demand_by_filament[layer_idx];
+                for (const auto &[own, outer, capacity] : shell_loops)
+                    volume += PurgeIntoInnerWalls::credit_shell_volume(own, outer, capacity, demand_left);
                 return volume;
             };
             for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx)

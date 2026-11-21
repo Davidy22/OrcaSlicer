@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cmath>
+#include <map>
 #include <optional>
 #include <tuple>
 #include <vector>
@@ -51,26 +52,25 @@ inline std::optional<Point> seam_point(const Points &polygon, double fraction,
     return last_point; // accumulated rounding at fraction 1
 }
 
-// Tiers are consumed in this order: preferred objects first, then regions that
-// already print the purge color on their outer wall. A color match is not
-// merely a tie-breaker: purge placed in a region whose exterior is the same
-// color cannot discolor anything, so that region is exhausted before a foreign
-// region gives up its native walls. Within a tier, color adjacency still wins
-// for matching walls (see wall_before). Native exterior/shield protection is
-// enforced before any of this.
-inline auto wall_tier(bool preferred, bool matches_outer_wall)
+// Tiers are consumed in this order: preferred objects first, then walls that
+// can carry the purge color without repainting anything. A color match is not
+// merely a tie-breaker: purge placed in a wall (or a region) that already
+// prints that color cannot discolor anything, so those walls are exhausted
+// before a foreign region gives up its native walls. Within a tier, color
+// adjacency still wins for matching walls (see wall_before). Native
+// exterior/shield protection is enforced before any of this.
+inline auto wall_tier(bool preferred, bool matches_purge_color)
 {
-    return std::make_tuple(preferred, matches_outer_wall);
+    return std::make_tuple(preferred, matches_purge_color);
 }
 
 // Depth preference: a matching wall is taken nearest its own exterior (the
-// exterior color continues through it), a foreign wall deepest first, so the
-// loop beside the visible boundary keeps its native color. Reusing an existing
-// wall before a purge-generated one saves the extra loop. Larger keys are
-// preferred.
-inline auto wall_depth_priority(bool matches_outer_wall, int inset_idx, bool existing)
+// purge color continues through it), a foreign wall deepest first, so the loop
+// beside the visible boundary keeps its native color. Reusing an existing wall
+// before a purge-generated one saves the extra loop. Larger keys are preferred.
+inline auto wall_depth_priority(bool matches_purge_color, int inset_idx, bool existing)
 {
-    return std::make_tuple(matches_outer_wall ? -inset_idx : inset_idx, existing);
+    return std::make_tuple(matches_purge_color ? -inset_idx : inset_idx, existing);
 }
 
 // Claim order inside one tier: true when `a` comes before `b`.
@@ -83,12 +83,12 @@ inline auto wall_depth_priority(bool matches_outer_wall, int inset_idx, bool exi
 //
 // A foreign tier is ordered by ascending volume, which is also the scan order
 // pick_volume_fit() needs, with the deepest loop first at equal volume.
-inline bool wall_before(bool a_matches_outer_wall, int a_inset, bool a_existing, float a_volume,
-                        bool b_matches_outer_wall, int b_inset, bool b_existing, float b_volume)
+inline bool wall_before(bool a_matches_purge_color, int a_inset, bool a_existing, float a_volume,
+                        bool b_matches_purge_color, int b_inset, bool b_existing, float b_volume)
 {
-    if (a_matches_outer_wall != b_matches_outer_wall)
-        return a_matches_outer_wall; // color adjacency outranks everything
-    if (a_matches_outer_wall) {
+    if (a_matches_purge_color != b_matches_purge_color)
+        return a_matches_purge_color; // color adjacency outranks everything
+    if (a_matches_purge_color) {
         const auto a_depth = wall_depth_priority(true, a_inset, a_existing);
         const auto b_depth = wall_depth_priority(true, b_inset, b_existing);
         return a_depth != b_depth ? a_depth > b_depth : a_volume < b_volume;
@@ -128,13 +128,44 @@ inline size_t pick_volume_fit(size_t count, VolumeAt volume_at, float remaining)
 // Index of the unclaimed slot to take next, over `count` candidates already in
 // wall_before() order, or `count` when the tier is exhausted.
 template<typename VolumeAt>
-inline size_t pick_next_claim(size_t count, bool matches_outer_wall, VolumeAt volume_at, float remaining)
+inline size_t pick_next_claim(size_t count, bool matches_purge_color, VolumeAt volume_at, float remaining)
 {
     if (count == 0)
         return count; // exhausted; a matching tier would otherwise report slot 0
-    if (!matches_outer_wall)
+    if (!matches_purge_color)
         return pick_volume_fit(count, volume_at, remaining);
     return 0;
+}
+
+// A shell loop is the last wall a region keeps behind its visible boundary. It
+// can carry purge of the color it already prints - its own filament, which for
+// an inner wall is the region's inner-wall filament, possibly different from
+// the exterior - without any color change at all, and it can also carry purge
+// of its region's exterior color, because that change stays hidden behind a
+// boundary of that color. Credit it against the demand of its own color first
+// and only with the remainder against the exterior color, so one physical loop
+// is never counted twice when both colors appear on the same layer. `demand` is
+// consumed as it is credited. Returns the volume this loop can absorb.
+inline float credit_shell_volume(unsigned int own_filament, unsigned int outer_filament, float volume,
+                                 std::map<unsigned int, float> &demand)
+{
+    if (volume <= 0.f)
+        return 0.f;
+    float credited = 0.f;
+    const auto credit = [&](unsigned int filament) {
+        const auto it = demand.find(filament);
+        if (it == demand.end())
+            return;
+        const float used = std::min(volume - credited, std::max(0.f, it->second));
+        if (used <= 0.f)
+            return;
+        it->second -= used;
+        credited   += used;
+    };
+    credit(own_filament);
+    if (outer_filament != own_filament)
+        credit(outer_filament);
+    return credited;
 }
 
 // WipeTower2's purge ramp, in mm/s rather than its writer's mm/min. Advance once
