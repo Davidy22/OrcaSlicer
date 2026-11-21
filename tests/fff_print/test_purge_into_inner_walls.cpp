@@ -663,10 +663,14 @@ TEST_CASE("Purge allocation ranks preferred objects then loop volumes across obj
     };
     const Claim large{walls[0][0], a, 0}, small_wall{walls[0][1], a, 0};
     const Claim medium_first{walls[1][0], b, 0}, medium_second{walls[1][0], b, 1};
-    std::vector<Claim> expected{large, medium_first, medium_second, small_wall};
+    // Every wall is larger than the 1 mm3 a single transition asks for, so each
+    // transition claims exactly one loop and the volume key picks the smallest
+    // one that can still absorb it. Within a tier that is ascending volume; the
+    // tiers themselves keep the priority order.
+    std::vector<Claim> expected{small_wall, medium_first, medium_second, large};
     if (first_preferred != second_preferred)
-        expected = first_preferred ? std::vector<Claim>{large, small_wall, medium_first, medium_second} :
-                                     std::vector<Claim>{medium_first, medium_second, large, small_wall};
+        expected = first_preferred ? std::vector<Claim>{small_wall, large, medium_first, medium_second} :
+                                     std::vector<Claim>{medium_first, medium_second, small_wall, large};
 
     FilamentChangeStats stats;
     unsigned int previous = 0;
@@ -695,23 +699,23 @@ TEST_CASE("Purge allocation ranks preferred objects then loop volumes across obj
                 }
 }
 
-TEST_CASE("Matching purge filament occupies the walls nearest the exterior", "[PurgeIntoInnerWalls][Regression]")
+TEST_CASE("Purge claims the smallest wall that absorbs a change instead of the nearest", "[PurgeIntoInnerWalls][Regression]")
 {
     const char *generator = GENERATE("classic", "arachne");
     const bool matching_first = GENERATE(false, true);
     const int inner_filament = GENERATE(0, 2); // default, or deliberately different from the exterior
-    const size_t copies = GENERATE(size_t{1}, size_t{2});
-    CAPTURE(generator, matching_first, inner_filament, copies);
+    CAPTURE(generator, matching_first, inner_filament);
 
     Model model;
     Print print;
     DynamicPrintConfig config = purge_config(generator, 6, false, 3);
     config.set_deserialize_strict({{"prime_volume", 1.}, {"inner_wall_filament_id", inner_filament}});
-    init_purge_print(print, model, config, true, copies);
+    // One copy keeps the claim sequence readable; per-copy shell reservation is
+    // covered by "Purge reserves a native inner shell independently for each copy".
+    init_purge_print(print, model, config, true, 1);
     print.process();
     REQUIRE(print.objects().size() == 2);
     const PrintObject *preferred = print.objects().front();
-    REQUIRE(preferred->instances().size() == copies);
     REQUIRE(preferred->layers().size() > 1);
     const Layer *layer = preferred->layers()[1];
 
@@ -721,26 +725,32 @@ TEST_CASE("Matching purge filament occupies the walls nearest the exterior", "[P
     LayerTools tools(layer->print_z);
     tools.extruders = matching_first ? std::vector<unsigned int>{0, 1, 2} : std::vector<unsigned int>{1, 2, 0};
     WipingExtrusions &wiping = tools.wiping_extrusions();
-    double closest_volume = 0.;
-    int closest_inset = std::numeric_limits<int>::max();
-    for (const PrintObject *object : print.objects()) {
-        const Layer *object_layer = object->get_layer_at_printz(tools.print_z, EPSILON);
-        REQUIRE(object_layer != nullptr);
-        for (const LayerRegion *region : object_layer->regions())
-            for (const ExtrusionEntity *entity : region->perimeters.entities) {
-                const auto *wall = dynamic_cast<const ExtrusionEntityCollection *>(entity);
-                REQUIRE(wall != nullptr);
-                const bool eligible = wiping.is_overriddable_and_mark(*wall, print.config(), *object, region->region());
-                if (object == preferred && eligible && wall->get_max_inset_idx() < closest_inset) {
-                    closest_inset = wall->get_max_inset_idx();
-                    closest_volume = wall->total_volume();
-                }
+    double smallest_volume = std::numeric_limits<double>::max();
+    int nearest_inset = std::numeric_limits<int>::max();
+    const ExtrusionEntityCollection *nearest_wall = nullptr;
+    for (const LayerRegion *region : layer->regions())
+        for (const ExtrusionEntity *entity : region->perimeters.entities) {
+            const auto *wall = dynamic_cast<const ExtrusionEntityCollection *>(entity);
+            REQUIRE(wall != nullptr);
+            if (!wiping.is_overriddable_and_mark(*wall, print.config(), *preferred, region->region()) ||
+                !wall->is_purge_inner_wall_candidate())
+                continue;
+            smallest_volume = std::min(smallest_volume, wall->total_volume());
+            if (wall->get_max_inset_idx() < nearest_inset) {
+                nearest_inset = wall->get_max_inset_idx();
+                nearest_wall = wall;
             }
-    }
-    REQUIRE(closest_volume > 0.);
-    REQUIRE(closest_inset > 0);
-    // Enough to claim one wall per copy, but not all of this object's walls.
-    const float demand = float(0.75 * closest_volume * copies);
+        }
+    REQUIRE(smallest_volume > 0.);
+    REQUIRE(nearest_inset > 0);
+    REQUIRE(nearest_wall != nullptr);
+    // Concentric loops shrink inward, so the loop nearest the exterior is the
+    // largest one while best fit prefers the smallest loop it can get away with.
+    REQUIRE(nearest_wall->total_volume() > smallest_volume);
+
+    // Small enough for every loop to absorb a change on its own, so one claim
+    // ends a change and the loop taken is the smallest one that still fits.
+    const float demand = float(0.75 * smallest_volume);
     FilamentChangeStats stats;
     unsigned int previous = matching_first ? 2 : 0;
     for (const unsigned int filament : tools.extruders) {
@@ -749,43 +759,41 @@ TEST_CASE("Matching purge filament occupies the walls nearest the exterior", "[P
         previous = filament;
     }
 
-    for (size_t copy = 0; copy < copies; ++copy) {
-        int furthest_matching = -1;
-        int nearest_foreign = std::numeric_limits<int>::max();
-        std::vector<bool> colors(3, false);
-        for (const LayerRegion *region : layer->regions()) {
-            REQUIRE(tools.wall_extruder_id(region->region()) == 0);
-            for (const ExtrusionEntity *entity : region->perimeters.entities) {
-                const auto *wall = dynamic_cast<const ExtrusionEntityCollection *>(entity);
-                REQUIRE(wall != nullptr);
-                const int filament = wiping.get_extruder_override(wall, preferred, copy);
-                if (!wall->is_purge_inner_wall_candidate()) {
-                    CHECK(filament < 0); // exterior/hole-boundary groups remain protected
-                    continue;
-                }
-                if (filament < 0)
-                    continue;
-                REQUIRE(filament < int(colors.size()));
-                colors[filament] = true;
-                if (filament == int(tools.wall_extruder_id(region->region())))
-                    furthest_matching = std::max(furthest_matching, wall->get_max_inset_idx());
-                else
-                    nearest_foreign = std::min(nearest_foreign, wall->get_max_inset_idx());
+    std::vector<bool> colors(3, false);
+    size_t claimed = 0;
+    for (const LayerRegion *region : layer->regions()) {
+        REQUIRE(tools.wall_extruder_id(region->region()) == 0);
+        for (const ExtrusionEntity *entity : region->perimeters.entities) {
+            const auto *wall = dynamic_cast<const ExtrusionEntityCollection *>(entity);
+            REQUIRE(wall != nullptr);
+            const int filament = wiping.get_extruder_override(wall, preferred, 0);
+            if (!wall->is_purge_inner_wall_candidate()) {
+                CHECK(filament < 0); // exterior/hole-boundary groups remain protected
+                continue;
             }
+            if (filament < 0)
+                continue;
+            ++claimed;
+            REQUIRE(filament < int(colors.size()));
+            colors[filament] = true;
+            // Best fit only ever claims a loop that can absorb the whole change...
+            CHECK(wall->total_volume() >= double(demand));
         }
-        for (const bool present : colors)
-            REQUIRE(present);
-        CHECK(furthest_matching == closest_inset);
-        CHECK(furthest_matching < nearest_foreign);
     }
+    for (const bool present : colors)
+        REQUIRE(present);
+    CHECK(claimed == tools.extruders.size()); // exactly one absorbing loop per change
+    // ...and while a smaller loop fits it never reaches for the largest one, so
+    // the loop beside the exterior keeps its native color.
+    CHECK(wiping.get_extruder_override(nearest_wall, preferred, 0) < 0);
+
     // The per-object preference still wins over a nonpreferred color match.
     const PrintObject *other = print.objects()[1];
     const Layer *other_layer = other->get_layer_at_printz(tools.print_z, EPSILON);
     REQUIRE(other_layer != nullptr);
     for (const LayerRegion *region : other_layer->regions())
         for (const ExtrusionEntity *entity : region->perimeters.entities)
-            for (size_t copy = 0; copy < copies; ++copy)
-                CHECK(wiping.get_extruder_override(entity, other, copy) < 0);
+            CHECK(wiping.get_extruder_override(entity, other, 0) < 0);
 }
 
 TEST_CASE("Only purged inner wall seams scatter across layers and copies", "[PurgeIntoInnerWalls][Regression]")

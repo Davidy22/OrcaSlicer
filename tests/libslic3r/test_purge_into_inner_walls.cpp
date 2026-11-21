@@ -372,27 +372,47 @@ TEST_CASE("Purge seam draws scatter identical loops and replay after an export r
     CHECK(std::unique(seams.begin(), seams.end()) == seams.end());
 }
 
-TEST_CASE("Purge wall priority favors preferred objects then matching exterior colors", "[PurgeIntoInnerWalls][Regression]")
+TEST_CASE("Purge wall tiers put preferred objects then matching exterior colors first", "[PurgeIntoInnerWalls][Regression]")
 {
-    using PurgeIntoInnerWalls::wall_priority;
-    // The per-object checkbox wins even over a matching, much larger wall.
-    CHECK(wall_priority(true, false, 5, false, 1.f) > wall_priority(false, true, 1, true, 100.f));
-    // A matching exterior color outranks volume: burning the purge filament
-    // inside its own color cannot discolor the part, so that region is used
-    // before a foreign region gives up a much larger native wall.
-    CHECK(wall_priority(false, true, 1, true, 1.f) > wall_priority(false, false, 3, false, 20.f));
-    CHECK(wall_priority(false, true, 9, false, 2.f) > wall_priority(false, false, 2, false, 500.f));
-    CHECK(wall_priority(false, true, 1, false, 1.f) > wall_priority(false, true, 3, false, 1.f));
-    // Within one color tier, volume outranks depth and whether the wall was
-    // generated for purge or already existed.
-    CHECK(wall_priority(true, true, 4, false, 20.f) > wall_priority(true, true, 1, true, 1.f));
-    CHECK(wall_priority(true, false, 2, false, 20.f) > wall_priority(true, false, 5, true, 1.f));
-    CHECK(wall_priority(false, false, 2, false, 20.f) > wall_priority(false, false, 2, true, 1.f));
-    // Equal volumes retain the color/depth/capacity tie-breakers.
-    CHECK(wall_priority(false, true, 4, true, 20.f) > wall_priority(false, false, 8, true, 20.f));
-    CHECK(wall_priority(false, true, 1, false, 20.f) > wall_priority(false, true, 3, true, 20.f));
-    CHECK(wall_priority(false, false, 5, false, 20.f) > wall_priority(false, false, 2, true, 20.f));
-    CHECK(wall_priority(false, false, 2, true, 20.f) > wall_priority(false, false, 2, false, 20.f));
+    using PurgeIntoInnerWalls::wall_tier;
+    using PurgeIntoInnerWalls::wall_depth_priority;
+    // The per-object checkbox wins even over a matching exterior color.
+    CHECK(wall_tier(true, false) > wall_tier(false, true));
+    // A matching exterior color outranks a foreign region: burning the purge
+    // filament inside its own color cannot discolor the part, so that region is
+    // exhausted before a foreign region gives up its native walls.
+    CHECK(wall_tier(false, true) > wall_tier(false, false));
+    CHECK(wall_tier(true, true) > wall_tier(true, false));
+
+    // Inside a tier, equal volumes prefer the loop nearest a matching exterior
+    // and the deepest loop for a foreign one, so the visible boundary keeps its
+    // native color either way.
+    CHECK(wall_depth_priority(true, 1, false) > wall_depth_priority(true, 3, true));
+    CHECK(wall_depth_priority(false, 5, false) > wall_depth_priority(false, 2, true));
+    // At equal depth an existing wall is reused before a purge-generated one.
+    CHECK(wall_depth_priority(true, 2, true) > wall_depth_priority(true, 2, false));
+    CHECK(wall_depth_priority(false, 2, true) > wall_depth_priority(false, 2, false));
+}
+
+TEST_CASE("Purge fills the smallest wall that absorbs the remainder", "[PurgeIntoInnerWalls][Regression]")
+{
+    using PurgeIntoInnerWalls::pick_volume_fit;
+    // Ascending volumes, as the allocator keeps them within a tier.
+    const auto volumes = [](std::vector<float> values) {
+        return [values = std::move(values)](size_t index) { return values.at(index); };
+    };
+    // The smallest loop that can absorb the whole remainder wins, so a small
+    // flush never burns a large wall.
+    CHECK(pick_volume_fit(4, volumes({2.f, 5.f, 40.f, 100.f}), 30.f) == 2);  // 40
+    CHECK(pick_volume_fit(4, volumes({2.f, 5.f, 40.f, 100.f}), 5.f) == 1);   // exact fit
+    CHECK(pick_volume_fit(4, volumes({2.f, 5.f, 40.f, 100.f}), 1.f) == 0);   // smallest available
+    CHECK(pick_volume_fit(4, volumes({2.f, 5.f, 40.f, 100.f}), 0.f) == 0);
+    // Nothing absorbs the remainder: fall back to the largest loop so packing
+    // converges instead of stalling on the smallest.
+    CHECK(pick_volume_fit(3, volumes({2.f, 5.f, 40.f}), 100.f) == 2);
+    CHECK(pick_volume_fit(3, volumes({2.f, 5.f, 40.f}), 40.5f) == 2);
+    // No candidates left.
+    CHECK(pick_volume_fit(0, volumes({}), 10.f) == 0);
 }
 
 TEST_CASE("Purge wall speed ramps without exceeding existing speed or flow limits", "[PurgeIntoInnerWalls][Regression]")
