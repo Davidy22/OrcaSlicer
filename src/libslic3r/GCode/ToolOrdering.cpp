@@ -3396,6 +3396,10 @@ void WipingExtrusions::set_extruder_override(const ExtrusionEntity* entity, cons
 {
     something_overridden = true;
 
+    // Every caller derives copy_id from the object's instances, so the index is
+    // always inside the vector it resizes to. Assert it: resize() then operator[]
+    // is silent heap corruption if that ever drifts.
+    assert(copy_id < num_of_copies);
     auto entity_map_it = (entity_map.emplace(std::make_tuple(entity, object), ExtruderPerCopy())).first; // (add and) return iterator
     ExtruderPerCopy& copies_vector = entity_map_it->second;
     copies_vector.resize(num_of_copies, -1);
@@ -3409,6 +3413,7 @@ void WipingExtrusions::set_extruder_override(const ExtrusionEntity* entity, cons
 void WipingExtrusions::set_native_extruder_override(const ExtrusionEntity* entity, const PrintObject* object, size_t copy_id, int extruder, size_t num_of_copies)
 {
     something_overridden = true;
+    assert(copy_id < num_of_copies);
     auto &copies = native_entity_map[std::make_tuple(entity, object)];
     copies.resize(num_of_copies, -1);
     copies[copy_id] = extruder;
@@ -3668,29 +3673,27 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         }
 
         // Group loops into (object priority, exterior color) tiers across all
-        // objects, not one whole object at a time, and order each tier by
-        // ascending volume so the best-fit choice below is a single pass.
-        // Equal keys keep deterministic object/copy order and shell reuse.
+        // objects, not one whole object at a time, then order each tier with
+        // wall_before(): matching walls by distance to their exterior, foreign
+        // walls by ascending volume. Equal keys keep deterministic object/copy
+        // order and shell reuse.
         std::stable_sort(candidates.begin(), candidates.end(), [](const PurgeCandidate& a, const PurgeCandidate& b) {
             const auto a_tier = PurgeIntoInnerWalls::wall_tier(a.preferred, a.matches_outer_wall);
             const auto b_tier = PurgeIntoInnerWalls::wall_tier(b.preferred, b.matches_outer_wall);
             if (a_tier != b_tier)
                 return a_tier > b_tier;
-            if (a.volume != b.volume)
-                return a.volume < b.volume;
-            return PurgeIntoInnerWalls::wall_depth_priority(a.matches_outer_wall, a.inset_idx, a.is_existing) >
-                   PurgeIntoInnerWalls::wall_depth_priority(b.matches_outer_wall, b.inset_idx, b.is_existing);
+            return PurgeIntoInnerWalls::wall_before(a.matches_outer_wall, a.inset_idx, a.is_existing, a.volume,
+                                                    b.matches_outer_wall, b.inset_idx, b.is_existing, b.volume);
         });
 
         // Phase 1: model inner walls. Tiers run in wall_tier() order, so purge
         // asking for the color a region already prints on its exterior is
         // served before a foreign region loses a wall, and only then does the
-        // next tier get a turn. Inside one tier the volume key is best-fit (see
-        // pick_volume_fit) rather than largest-first: a small flush uses a small
-        // loop instead of repainting a whole wall the print needs anyway, and a
-        // flush no single loop can absorb drains the largest loops first. The
-        // shell reservation below keeps every visible boundary native whichever
-        // loop was picked.
+        // next tier get a turn. Within a tier the claim order is wall_before():
+        // matching walls go nearest-their-exterior first, so the color match
+        // wins over volume fitting; foreign walls are best-fit (see
+        // pick_volume_fit) rather than largest-first. The shell reservation
+        // below keeps every visible boundary native whichever loop was picked.
         const auto claim = [&](const PurgeCandidate& cand) {
             const size_t num_of_copies = cand.object->instances().size();
 
@@ -3726,17 +3729,20 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                 ++tier_end;
 
             // Claimed loops are dropped from this list, which stays in
-            // ascending volume order because the tiers are sorted that way.
+            // wall_before() order because the tier is sorted that way: ascending
+            // volume for a foreign tier, nearest-exterior first for a matching
+            // one.
             std::vector<size_t> unclaimed;
             unclaimed.reserve(tier_end - tier_begin);
             for (size_t i = tier_begin; i < tier_end; ++i)
                 if (!is_entity_overridden(candidates[i].collection, candidates[i].object, candidates[i].copy))
                     unclaimed.push_back(i);
 
+            const bool tier_matches = std::get<1>(tier_key);
             while (remaining > 0.f && !unclaimed.empty()) {
-                const size_t slot = PurgeIntoInnerWalls::pick_volume_fit(
-                    unclaimed.size(), [&unclaimed, &candidates](size_t i) { return candidates[unclaimed[i]].volume; },
-                    remaining);
+                const size_t slot = PurgeIntoInnerWalls::pick_next_claim(
+                    unclaimed.size(), tier_matches,
+                    [&unclaimed, &candidates](size_t i) { return candidates[unclaimed[i]].volume; }, remaining);
                 if (slot >= unclaimed.size())
                     break;
                 const size_t index = unclaimed[slot];

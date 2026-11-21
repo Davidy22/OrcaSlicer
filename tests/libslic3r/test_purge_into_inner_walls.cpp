@@ -394,10 +394,44 @@ TEST_CASE("Purge wall tiers put preferred objects then matching exterior colors 
     CHECK(wall_depth_priority(false, 2, true) > wall_depth_priority(false, 2, false));
 }
 
-TEST_CASE("Purge fills the smallest wall that absorbs the remainder", "[PurgeIntoInnerWalls][Regression]")
+TEST_CASE("Purge wall color matching outranks the volume fit inside a tier", "[PurgeIntoInnerWalls][Regression]")
+{
+    using PurgeIntoInnerWalls::wall_before;
+    using PurgeIntoInnerWalls::pick_next_claim;
+    const auto volumes = [](std::vector<float> values) {
+        return [values = std::move(values)](size_t index) { return values.at(index); };
+    };
+
+    // A matching tier is claimed by distance to its own exterior, not by how
+    // well a loop is sized: the wall the purge color continues through is worth
+    // more than packing efficiency, so a huge nearest loop comes before a small
+    // deep one.
+    CHECK(wall_before(true, 1, false, 900.f, true, 4, false, 10.f));
+    CHECK_FALSE(wall_before(true, 4, false, 10.f, true, 1, false, 900.f));
+    // Equal depth falls back to volume, then existing-before-generated via the
+    // depth key.
+    CHECK(wall_before(true, 2, false, 10.f, true, 2, false, 20.f));
+    CHECK(wall_before(true, 2, true, 20.f, true, 2, false, 10.f));
+
+    // A foreign tier keeps best-fit volume ordering, deepest loop first on ties.
+    CHECK(wall_before(false, 6, false, 10.f, false, 1, false, 20.f));
+    CHECK(wall_before(false, 6, false, 10.f, false, 1, false, 10.f));
+    CHECK_FALSE(wall_before(false, 1, false, 10.f, false, 6, false, 10.f));
+
+    // The claim picker never reorders a matching tier...
+    CHECK(pick_next_claim(4, true, volumes({2.f, 5.f, 40.f, 100.f}), 30.f) == 0);
+    // ...but best-fits a foreign one.
+    CHECK(pick_next_claim(4, false, volumes({2.f, 5.f, 40.f, 100.f}), 30.f) == 2);
+    // An exhausted tier reports `count`, never a claimable slot.
+    CHECK(pick_next_claim(0, true, volumes({}), 30.f) == 0);
+    CHECK(pick_next_claim(0, false, volumes({}), 30.f) == 0);
+}
+
+TEST_CASE("Purge fills the smallest foreign wall that absorbs the remainder", "[PurgeIntoInnerWalls][Regression]")
 {
     using PurgeIntoInnerWalls::pick_volume_fit;
-    // Ascending volumes, as the allocator keeps them within a tier.
+    // Ascending volumes, as the allocator keeps a foreign tier. A matching tier
+    // is claimed in color order instead, see pick_next_claim().
     const auto volumes = [](std::vector<float> values) {
         return [values = std::move(values)](size_t index) { return values.at(index); };
     };
