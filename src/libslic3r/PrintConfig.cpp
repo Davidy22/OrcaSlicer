@@ -8494,6 +8494,7 @@ void PrintConfigDef::init_fff_params()
         "Model outer walls are never used for purging. "
         "A purge color that a region already prints on its outer wall is placed in that region first, in the loop closest to that "
         "outer wall: a matching loop needs no extra wall, because the purge color already matches the visible surface there. "
+        "Inner walls already printed in the purge color also count toward the purge volume. "
         "Regions printed in another color give up their inner walls from the inside out. "
         "Objects marked with the per-object 'Prioritize for purge into inner walls' option "
         "are filled first and receive the extra wall loops. If no object is prioritized, all objects can receive extra loops. "

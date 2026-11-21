@@ -5951,30 +5951,18 @@ void Print::_plan_purge_into_inner_walls()
     for (PrintObject *object : m_objects)
         for (SupportLayer *support : object->support_layers())
             if (restored_supports.insert(support).second) {
-                // Generators register direct child groups. A pipeline hook may
-                // replace/regroup those paths: discard stale growth metadata
-                // rather than dereferencing a collection it no longer owns.
-                // Test the first registered region only: it was registered
-                // against the original support_fills.entities buffer, so its
-                // address identifies the allocation to validate. A region
-                // registered after that vector grew points into the live buffer,
-                // moves on the next grow() and cannot dangle -- testing it would
-                // discard healthy growth state on every replan.
+                // Each registered collection is a direct child of support_fills.
+                // A pipeline hook can replace any subset of those children, so
+                // validate every pointer before resetting its saved paths.
                 auto &regions = support->purge_support_regions;
                 if (!regions.empty()) {
                     const std::unordered_set<const ExtrusionEntity *> groups(
                         support->support_fills.entities.begin(), support->support_fills.entities.end());
-                    if (groups.count(regions.front().collection()) == 0)
-                        // The group this layer grew is gone (regenerated or
-                        // regrouped upstream, e.g. posSupportMaterial re-running
-                        // alone). Every region's m_paths dangles and reset()
-                        // would swap through it. Drop the growth state instead
-                        // of touching it: the grown entities die with the old
-                        // geometry they belonged to.
-                        regions.clear();
-                    else
-                        for (SupportLayer::PurgeRegion &region : regions)
-                            region.reset();
+                    regions.erase(std::remove_if(regions.begin(), regions.end(), [&](const SupportLayer::PurgeRegion &region) {
+                        return groups.count(region.collection()) == 0;
+                    }), regions.end());
+                    for (SupportLayer::PurgeRegion &region : regions)
+                        region.reset();
                 }
             }
 

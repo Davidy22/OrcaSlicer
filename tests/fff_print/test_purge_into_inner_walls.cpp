@@ -872,6 +872,67 @@ TEST_CASE("Purge reuses inner walls that already print the purge color", "[Purge
             CHECK(wiping.get_extruder_override(entity, other, 0) < 0);
 }
 
+TEST_CASE("Purge keeps the loop behind a claimed wall in its own color", "[PurgeIntoInnerWalls][Regression]")
+{
+    const char *generator = GENERATE("classic", "arachne");
+    CAPTURE(generator);
+
+    // Outer walls on filament 1, the user's inner walls on filament 2. A foreign
+    // change may take a deep loop, but the loop that hides it has to keep
+    // printing the inner-wall filament instead of being repainted in the
+    // region's exterior filament.
+    Model model;
+    Print print;
+    DynamicPrintConfig config = purge_config(generator, 4, false, 4);
+    config.set_deserialize_strict({{"prime_volume", 1.}, {"inner_wall_filament_id", 2}});
+    TriangleMesh first = make_cube(20., 20., 1.);
+    first.translate(40.f, 40.f, 0.f);
+    TriangleMesh second = make_cube(20., 20., 1.);
+    second.translate(80.f, 40.f, 0.f);
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
+        {{"extruder", 1}, {"purge_into_inner_walls_preferred", true}},
+        {{"extruder", 2}},
+    };
+    Test::init_print({first, second}, print, model, config, &overrides, false);
+    print.process();
+    REQUIRE(print.objects().size() == 2);
+    const PrintObject *preferred = print.objects().front();
+    REQUIRE(preferred->layers().size() > 1);
+    const Layer *layer = preferred->layers()[1];
+    REQUIRE(layer->regions().size() == 1);
+    const PrintRegion &region = layer->regions().front()->region();
+
+    LayerTools tools(layer->print_z);
+    tools.extruders = {3}; // foreign to both the exterior and the inner walls
+    WipingExtrusions &wiping = tools.wiping_extrusions();
+    const ExtrusionEntityCollection *nearest = nullptr;
+    int nearest_inset = std::numeric_limits<int>::max();
+    int deepest_inset = -1;
+    for (const auto &candidate : layer->purge_inner_walls()) {
+        if (!wiping.is_overriddable_and_mark(*candidate.wall.collection, print.config(), *preferred,
+                                             candidate.region->region()))
+            continue;
+        const int inset = candidate.wall.collection->get_max_inset_idx();
+        if (inset < nearest_inset) {
+            nearest_inset = inset;
+            nearest = candidate.wall.collection;
+        }
+        deepest_inset = std::max(deepest_inset, inset);
+    }
+    REQUIRE(nearest != nullptr);
+    REQUIRE(deepest_inset > nearest_inset); // a wall sits behind the boundary loop
+    // Premise: the boundary loop prints the inner-wall filament, not the exterior.
+    REQUIRE(tools.wall_extruder_id(region) == 0);
+    REQUIRE(tools.extruder(*nearest, region) == 1);
+
+    // Small enough that the smallest (deepest) loop absorbs the whole change.
+    FilamentChangeStats stats;
+    CHECK_THAT(wiping.mark_wiping_extrusions(print, 0, 3, 0.5f, stats), Catch::Matchers::WithinAbs(0., 1e-5));
+    CHECK(wiping.get_extruder_override(nearest, preferred, 0) < 0);
+    // The reserved loop keeps its own filament (2 -> index 1), not the exterior's.
+    CHECK(wiping.get_native_extruder_override(nearest, preferred, 0) == 1);
+}
+
 TEST_CASE("Only purged inner wall seams scatter across layers and copies", "[PurgeIntoInnerWalls][Regression]")
 {
     const char *generator = GENERATE("classic", "arachne");
