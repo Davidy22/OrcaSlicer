@@ -56,9 +56,6 @@ public:
 
     // Read-only, per-entity/per-copy routing (unclaimed/native returns -1).
     int get_extruder_override(const ExtrusionEntity* entity, const PrintObject* object, size_t copy_id) const;
-    // A native shell is normal printing, not purge, and may need the outer
-    // filament even when the region config selects a different inner filament.
-    int get_native_extruder_override(const ExtrusionEntity* entity, const PrintObject* object, size_t copy_id) const;
     float purge_capacity(const Print& print, unsigned int initial_extruder) const;
     static bool can_purge(const PrintConfig& config, unsigned int old_extruder, unsigned int new_extruder);
 
@@ -110,15 +107,11 @@ private:
 
     // This function is called from mark_wiping_extrusions and sets extruder that it should be printed with (-1 .. as usual)
     void set_extruder_override(const ExtrusionEntity* entity, const PrintObject* object, size_t copy_id, int extruder, size_t num_of_copies);
-    void set_native_extruder_override(const ExtrusionEntity* entity, const PrintObject* object, size_t copy_id, int extruder, size_t num_of_copies);
     // BBS
     void set_support_extruder_override(const PrintObject* object, size_t copy_id, int extruder, size_t num_of_copies);
     void set_support_interface_extruder_override(const PrintObject* object, size_t copy_id, int extruder, size_t num_of_copies);
 
     std::map<std::tuple<const ExtrusionEntity*, const PrintObject *>, ExtruderPerCopy> entity_map;  // to keep track of who prints what
-    // Kept separate from purge claims: shields must use the normal-print pass
-    // and speed, and reserving one must never consume a purge budget.
-    std::map<std::tuple<const ExtrusionEntity*, const PrintObject *>, ExtruderPerCopy> native_entity_map;
     // BBS
     std::map<const PrintObject*, int> support_map;
     std::map<const PrintObject*, int> support_intf_map;

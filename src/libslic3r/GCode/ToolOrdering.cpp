@@ -3410,15 +3410,6 @@ void WipingExtrusions::set_extruder_override(const ExtrusionEntity* entity, cons
     copies_vector[copy_id] = extruder;
 }
 
-void WipingExtrusions::set_native_extruder_override(const ExtrusionEntity* entity, const PrintObject* object, size_t copy_id, int extruder, size_t num_of_copies)
-{
-    something_overridden = true;
-    assert(copy_id < num_of_copies);
-    auto &copies = native_entity_map[std::make_tuple(entity, object)];
-    copies.resize(num_of_copies, -1);
-    copies[copy_id] = extruder;
-}
-
 // BBS
 void WipingExtrusions::set_support_extruder_override(const PrintObject* object, size_t copy_id, int extruder, size_t num_of_copies)
 {
@@ -3521,12 +3512,6 @@ int WipingExtrusions::get_extruder_override(const ExtrusionEntity* entity, const
 {
     const auto it = entity_map.find(std::make_tuple(entity, object));
     return it != entity_map.end() && copy_id < it->second.size() ? std::max(-1, int(it->second[copy_id])) : -1;
-}
-
-int WipingExtrusions::get_native_extruder_override(const ExtrusionEntity* entity, const PrintObject* object, size_t copy_id) const
-{
-    const auto it = native_entity_map.find(std::make_tuple(entity, object));
-    return it != native_entity_map.end() && copy_id < it->second.size() ? it->second[copy_id] : -1;
 }
 
 float WipingExtrusions::purge_capacity(const Print& print, unsigned int initial_extruder) const
@@ -3963,19 +3948,12 @@ const WipingExtrusions::ExtruderPerCopy* WipingExtrusions::get_extruder_override
 	ExtruderPerCopy *overrides = nullptr;
     const auto key = std::make_tuple(entity, object);
     auto entity_map_it = entity_map.find(key);
-    if (entity_map_it == entity_map.end() && native_entity_map.find(key) != native_entity_map.end())
-        entity_map_it = entity_map.emplace(key, ExtruderPerCopy()).first;
     if (entity_map_it != entity_map.end()) {
         overrides = &entity_map_it->second;
         overrides->resize(num_of_copies, -1);
-        // Negative ids select the NORMAL-print pass, unlike positive purge
-        // claims. Preserve the per-copy shell color, including tool zero (-1),
-        // instead of replacing it with the configured inner-wall filament.
         for (size_t copy = 0; copy < num_of_copies; ++copy)
-            if ((*overrides)[copy] == -1) {
-                const int native = get_native_extruder_override(entity, object, copy);
-                (*overrides)[copy] = -(native < 0 ? correct_extruder_id : native) - 1;
-            }
+            if ((*overrides)[copy] == -1)
+                (*overrides)[copy] = -correct_extruder_id - 1;
     }
     return overrides;
 }
