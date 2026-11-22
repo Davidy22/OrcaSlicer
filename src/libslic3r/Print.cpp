@@ -5990,7 +5990,7 @@ void Print::_plan_purge_into_inner_walls()
             [this](unsigned int from, unsigned int to) {
                 return WipingExtrusions::can_purge(m_config, from, to) ? estimate_flush_volume(m_config, from, to) : 0.f;
             });
-        const double deficit = demand - tools.wiping_extrusions().purge_capacity(*this, initial_extruder);
+        double deficit = demand - tools.wiping_extrusions().purge_capacity(*this, initial_extruder);
         if (deficit <= EPSILON)
             continue;
 
