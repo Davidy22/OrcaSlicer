@@ -28,14 +28,11 @@ inline T tapered_rings(T rings, T layers_between)
 
 // Visits every toolchange of a layer's filament sequence in print order.
 // `previous` is the filament the layer starts with (-1 when unknown, for the
-// first layer or an object whose entry filament no one tracked) and is left
-// at the layer's last filament so the caller carries it into the next object
-// or layer. Repeating the same filament is not a toolchange.
-//
-// Every place that sizes purge capacity - the demand-driven growth of model
-// walls and support walls, the proportional reduction at allocation time, and
-// the allocation itself - walks a layer this way. Keeping the walk here keeps
-// those four estimates consistent with each other.
+// first layer or an object whose entry filament no one tracked) and is left at
+// the layer's last filament, so the caller carries it into the next object or
+// layer. Repeating the same filament is not a toolchange. Every purge estimate
+// (model demand, support deficit, proportional reduction, allocation) walks a
+// layer this way, which keeps those volumes comparable.
 template<typename Extruders, typename F>
 inline void for_each_toolchange(const Extruders &extruders, int &previous, F &&fn)
 {

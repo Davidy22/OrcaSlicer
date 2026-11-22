@@ -686,11 +686,9 @@ double SupportLayer::PurgeRegion::grow_to_ring_count(size_t min_rings)
     return this->grow_impl(std::numeric_limits<double>::infinity(), min_rings);
 }
 
-// Grown walls taper out one ring per layer, so the layers below a wall spike
-// carry one ring less than the layer above until the extra walls are gone.
-// The walk visits every layer between the grown region and this one, so a
-// region separated by a gap (a roof/interface layer without a base fill, for
-// example) costs as many rings as there are layers in between.
+// The taper counts layers, not touching regions: every layer in between costs
+// a ring, including the ones a gap hides (a roof/interface layer without a
+// base fill, for example).
 size_t SupportLayer::required_rings(size_t own_rings, const BoundingBox &region_box, size_t layer_idx,
                                     const std::vector<WallGrowth> &grown_above)
 {
