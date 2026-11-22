@@ -137,37 +137,6 @@ inline size_t pick_next_claim(size_t count, bool matches_purge_color, VolumeAt v
     return 0;
 }
 
-// A shell loop is the last wall a region keeps behind its visible boundary. It
-// can carry purge of the color it already prints - its own filament, which for
-// an inner wall is the region's inner-wall filament, possibly different from
-// the exterior - without any color change at all, and it can also carry purge
-// of its region's exterior color, because that change stays hidden behind a
-// boundary of that color. Credit it against the demand of its own color first
-// and only with the remainder against the exterior color, so one physical loop
-// is never counted twice when both colors appear on the same layer. `demand` is
-// consumed as it is credited. Returns the volume this loop can absorb.
-inline float credit_shell_volume(unsigned int own_filament, unsigned int outer_filament, float volume,
-                                 std::map<unsigned int, float> &demand)
-{
-    if (volume <= 0.f)
-        return 0.f;
-    float credited = 0.f;
-    const auto credit = [&](unsigned int filament) {
-        const auto it = demand.find(filament);
-        if (it == demand.end())
-            return;
-        const float used = std::min(volume - credited, std::max(0.f, it->second));
-        if (used <= 0.f)
-            return;
-        it->second -= used;
-        credited   += used;
-    };
-    credit(own_filament);
-    if (outer_filament != own_filament)
-        credit(outer_filament);
-    return credited;
-}
-
 // WipeTower2's purge ramp, in mm/s rather than its writer's mm/min. Advance once
 // per purged wall, not once per path segment (Arachne/overhang/scarf can split a
 // wall). Neither the ramp nor the flush-flow limit may accelerate a slower path.

@@ -5982,16 +5982,6 @@ void Print::_plan_purge_into_inner_walls()
     // Model wall growth has already run, before model infill. Only its
     // residual demand may increase support wall loops. Existing support fill
     // and interfaces count first, so usable native support needs no extra walls.
-    //
-    // Support loops grow on the same objects that were allowed to grow model
-    // loops (prioritized ones, or all objects when none is prioritized). An
-    // object that never received extra model walls must not receive extra
-    // support walls either: its support would then absorb purge that its own
-    // inner walls had room for, which reads as purge preferring support over
-    // the model.
-    const bool any_preferred = std::any_of(m_objects.begin(), m_objects.end(), [](const PrintObject *object) {
-        return object->config().purge_into_inner_walls_preferred.getBool();
-    });
     PrintObjectPtrs support_objects = m_objects;
     std::stable_sort(support_objects.begin(), support_objects.end(), [](const PrintObject *a, const PrintObject *b) {
         return a->config().purge_into_inner_walls_preferred.getBool() > b->config().purge_into_inner_walls_preferred.getBool();
@@ -6013,8 +6003,6 @@ void Print::_plan_purge_into_inner_walls()
         // toolpaths just once. Keep object order deterministic.
         std::vector<std::pair<SupportLayer *, size_t>> supports;
         for (PrintObject *object : support_objects) {
-            if (any_preferred && !object->config().purge_into_inner_walls_preferred.getBool())
-                continue; // never grew model walls, so it must not grow support walls either
             if (!tools.wiping_extrusions().is_support_overriddable(erSupportMaterial, *object))
                 continue;
             SupportLayer *support = object->get_support_layer_at_printz(tools.print_z, EPSILON);

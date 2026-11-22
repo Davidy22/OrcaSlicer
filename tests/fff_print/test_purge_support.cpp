@@ -214,8 +214,6 @@ TEST_CASE("Supports absorb residual purge after model walls and grow past two lo
                     for (const auto &candidate : layer->purge_inner_walls()) {
                         const LayerRegion *region = candidate.region;
                         const auto *walls = candidate.wall.collection;
-                        if (candidate.wall.is_shell())
-                            continue;
                         if (!tools.wiping_extrusions().is_overriddable(*walls, print.config(), *object, region->region()))
                             continue;
                         for (size_t copy = 0; copy < object->instances().size(); ++copy)

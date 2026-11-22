@@ -660,17 +660,14 @@ void PrintObject::make_perimeters()
     const PrintConfig &purge_cfg = m_print->config();
     if (purge_cfg.purge_into_inner_walls.getBool() && !purge_cfg.spiral_mode.getBool()
         && purge_cfg.print_sequence != PrintSequence::ByObject && !m_layers.empty()) {
-        bool any_preferred = false;
         size_t num_instances = std::max<size_t>(this->instances().size(), 1);
         for (const PrintObject *object : m_print->objects()) {
-            any_preferred |= object->config().purge_into_inner_walls_preferred.getBool();
             // Shared layers are generated only here, but printed by every
             // recipient. Credit their copies before deciding to add walls.
             if (object->get_shared_object() == this)
                 num_instances += std::max<size_t>(object->instances().size(), 1);
         }
-        const bool grow_here = this->config().purge_into_inner_walls_preferred.getBool() || !any_preferred;
-        if (grow_here) {
+        {
             const float num_copies = float(num_instances);
 
             // Filaments printing on a layer, in printing order, from the region
@@ -741,11 +738,7 @@ void PrintObject::make_perimeters()
                         const Layer *layer = object->get_layer_at_printz(z, EPSILON);
                         if (layer == nullptr)
                             continue;
-                        // Split the demand between the objects that grow
-                        // loops (marked ones, or all objects when none is
-                        // marked).
-                        if (object->config().purge_into_inner_walls_preferred.getBool() || !any_preferred)
-                            ++preferred_count;
+                        ++preferred_count;
                         for (const unsigned int filament : layer_filament_sequence(layer)) {
                             if (prev_filament >= 0 && (int) filament != prev_filament
                                 && WipingExtrusions::can_purge(purge_cfg, (unsigned int) prev_filament, filament)) {
@@ -777,32 +770,8 @@ void PrintObject::make_perimeters()
             auto measure_layer = [this, num_copies, &demand_by_filament](size_t layer_idx) {
                 float volume = 0.f;
                 // Purge walls are inner walls, so the color a shell loop already
-                // prints is the region's inner-wall filament, which may differ
-                // from its exterior. Map 1-based filament ids the way
-                // LayerTools::extruder()/wall_extruder_id() do (0 = the active
-                // filament, i.e. the first one), so capacity is credited to the
-                // same colors the allocator can actually claim.
-                const auto filament_index = [](int id) { return id > 0 ? unsigned(id - 1) : 0u; };
-                std::vector<std::tuple<unsigned int, unsigned int, float>> shell_loops;
-                for (const auto &candidate : m_layers[layer_idx]->purge_inner_walls()) {
-                    const float capacity = float(candidate.wall.collection->total_volume()) * num_copies;
-                    if (candidate.wall.is_shell()) {
-                        const PrintRegionConfig &rcfg = candidate.region->region().config();
-                        shell_loops.emplace_back(filament_index(rcfg.inner_wall_filament_id.value),
-                                                 filament_index(rcfg.outer_wall_filament_id.value), capacity);
-                    } else
-                        volume += capacity;
-                }
-                // Keep one native-color inner wall behind each visible boundary.
-                // A shell loop absorbs the color it already prints first (no
-                // color change at all) and then its region's exterior color, so
-                // it is never credited twice for the same volume. Otherwise grow
-                // a replacement deeper inside, before infill, and include it in
-                // extra_loops so the ordinary downward support propagation also
-                // carries it.
-                std::map<unsigned int, float> demand_left = demand_by_filament[layer_idx];
-                for (const auto &[own, outer, capacity] : shell_loops)
-                    volume += PurgeIntoInnerWalls::credit_shell_volume(own, outer, capacity, demand_left);
+                for (const auto &candidate : m_layers[layer_idx]->purge_inner_walls())
+                    volume += float(candidate.wall.collection->total_volume()) * num_copies;
                 return volume;
             };
             for (size_t layer_idx = 0; layer_idx < m_layers.size(); ++layer_idx)
