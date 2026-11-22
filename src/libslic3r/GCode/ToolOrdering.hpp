@@ -58,6 +58,11 @@ public:
     int get_extruder_override(const ExtrusionEntity* entity, const PrintObject* object, size_t copy_id) const;
     float purge_capacity(const Print& print, unsigned int initial_extruder) const;
     static bool can_purge(const PrintConfig& config, unsigned int old_extruder, unsigned int new_extruder);
+    // Purge allocation order: objects marked "prioritize purge into inner
+    // walls" first, then the stable object order. Both the demand-driven
+    // support growth (Print::_plan_purge_into_inner_walls()) and the claim
+    // order here have to agree, so they share this comparator.
+    static bool purge_object_before(const PrintObject *a, const PrintObject *b);
 
     // This function goes through all infill entities, decides which ones will be used for wiping and
     // marks them by the extruder id. Returns volume that remains to be wiped on the wipe tower:

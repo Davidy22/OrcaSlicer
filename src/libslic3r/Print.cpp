@@ -37,6 +37,7 @@
 #include <chrono>
 #include <optional>
 #include "GCode/GCodeProcessor.hpp"
+#include "GCode/PurgeIntoInnerWalls.hpp"
 #include "GCode/ThumbnailData.hpp"
 #include "ExtrusionEntity.hpp"
 #include <math.h>
@@ -5918,17 +5919,15 @@ std::vector<float> Print::_wipe_purge_at_toolchanges()
 {
     std::vector<float> layer_leftovers;
     layer_leftovers.reserve(m_wipe_tower_data.tool_ordering.layer_tools().size());
-    unsigned int current_extruder_id = m_wipe_tower_data.tool_ordering.first_extruder();
+    int current_extruder_id = int(m_wipe_tower_data.tool_ordering.first_extruder());
     for (auto &layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) {
         float layer_leftover = 0.f;
-        for (const unsigned int extruder_id : layer_tools.extruders) {
-            if (extruder_id == current_extruder_id)
-                continue;
-            const float volume_to_wipe = estimate_flush_volume(m_config, current_extruder_id, extruder_id);
-            layer_leftover += layer_tools.wiping_extrusions().mark_wiping_extrusions(
-                *this, current_extruder_id, extruder_id, volume_to_wipe, m_tool_ordering.m_stats_by_single_extruder);
-            current_extruder_id = extruder_id;
-        }
+        PurgeIntoInnerWalls::for_each_toolchange(layer_tools.extruders, current_extruder_id,
+            [&](unsigned int from, unsigned int to) {
+                const float volume_to_wipe = estimate_flush_volume(m_config, from, to);
+                layer_leftover += layer_tools.wiping_extrusions().mark_wiping_extrusions(
+                    *this, from, to, volume_to_wipe, m_tool_ordering.m_stats_by_single_extruder);
+            });
         layer_leftovers.emplace_back(layer_leftover);
     }
     return layer_leftovers;
@@ -5983,19 +5982,15 @@ void Print::_plan_purge_into_inner_walls()
     // residual demand may increase support wall loops. Existing support fill
     // and interfaces count first, so usable native support needs no extra walls.
     PrintObjectPtrs support_objects = m_objects;
-    std::stable_sort(support_objects.begin(), support_objects.end(), [](const PrintObject *a, const PrintObject *b) {
-        return a->config().purge_into_inner_walls_preferred.getBool() > b->config().purge_into_inner_walls_preferred.getBool();
-    });
-    unsigned int previous_extruder = m_wipe_tower_data.tool_ordering.first_extruder();
+    std::stable_sort(support_objects.begin(), support_objects.end(), WipingExtrusions::purge_object_before);
+    int previous_extruder = int(m_wipe_tower_data.tool_ordering.first_extruder());
     for (LayerTools &tools : m_wipe_tower_data.tool_ordering.layer_tools()) {
-        const unsigned int initial_extruder = previous_extruder;
-        double demand = 0.;
-        for (const unsigned int extruder : tools.extruders) {
-            if (WipingExtrusions::can_purge(m_config, previous_extruder, extruder))
-                demand += estimate_flush_volume(m_config, previous_extruder, extruder);
-            previous_extruder = extruder;
-        }
-        double deficit = demand - tools.wiping_extrusions().purge_capacity(*this, initial_extruder);
+        const unsigned int initial_extruder = unsigned(previous_extruder);
+        const double demand = PurgeIntoInnerWalls::purge_demand<double>(tools.extruders, previous_extruder,
+            [this](unsigned int from, unsigned int to) {
+                return WipingExtrusions::can_purge(m_config, from, to) ? estimate_flush_volume(m_config, from, to) : 0.f;
+            });
+        const double deficit = demand - tools.wiping_extrusions().purge_capacity(*this, initial_extruder);
         if (deficit <= EPSILON)
             continue;
 
@@ -6027,9 +6022,11 @@ void Print::_plan_purge_into_inner_walls()
         }
     }
 
-    // Downward propagation: grown support walls need the layer below to carry
-    // at least as many walls; walk top to bottom and lift every region to the
-    // ring count of the most demanding region overlapping it from above.
+    // Downward propagation: grown support walls taper out one ring per layer,
+    // so a purge-driven spike never prints into air and never runs the full
+    // height of the support as a thick wall. Walk top to bottom and lift every
+    // region to the requirement of the grown regions above it: one ring fewer
+    // for every layer in between (SupportLayer::required_rings()).
     // The lift adds structural walls, not deficit demand (the deficit pass above
     // is done), and they are ordinary support paths the allocation below may use.
     // Best effort — regions that run solid cannot grow further. The grown state
@@ -6038,19 +6035,19 @@ void Print::_plan_purge_into_inner_walls()
     // unshared stack still lifts the shared regions.
     for (PrintObject *object : m_objects) {
         SupportLayerPtrs &object_support_layers = object->support_layers();
-        std::vector<std::pair<BoundingBox, size_t>> grown_above;
+        std::vector<SupportLayer::WallGrowth> grown_above;
         for (size_t layer_idx = object_support_layers.size(); layer_idx-- > 0;) {
             SupportLayer *layer = object_support_layers[layer_idx];
+            // Regions whose taper already reached this layer cannot require
+            // anything lower down, and the walk never goes back up.
+            grown_above.erase(std::remove_if(grown_above.begin(), grown_above.end(),
+                [layer_idx](const SupportLayer::WallGrowth &upper) {
+                    return upper.layer_idx <= layer_idx ||
+                           PurgeIntoInnerWalls::tapered_rings(upper.rings, upper.layer_idx - layer_idx) == 0;
+                }), grown_above.end());
             for (SupportLayer::PurgeRegion &region : layer->purge_support_regions) {
-                if (grown_above.empty())
-                    continue;
-                const BoundingBox region_box = region.bbox();
-                if (!region_box.defined)
-                    continue;
-                size_t required = region.grown_rings();
-                for (const auto &[upper_box, upper_rings] : grown_above)
-                    if (region_box.overlap(upper_box))
-                        required = std::max(required, upper_rings);
+                const size_t required = SupportLayer::required_rings(
+                    region.grown_rings(), region.bbox(), layer_idx, grown_above);
                 if (required > region.grown_rings())
                     region.grow_to_ring_count(required);
                 this->throw_if_canceled();
@@ -6061,7 +6058,7 @@ void Print::_plan_purge_into_inner_walls()
                 const BoundingBox region_box = region.bbox();
                 if (!region_box.defined)
                     continue;
-                grown_above.emplace_back(region_box, region.grown_rings());
+                grown_above.push_back({region_box, layer_idx, region.grown_rings()});
             }
         }
     }

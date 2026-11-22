@@ -400,7 +400,7 @@ TEST_CASE("Protected purge transitions stay blocked with inner-wall mode on or o
     CHECK(WipingExtrusions::can_purge(config, 0, 1) == expected);
 }
 
-TEST_CASE("Grown support walls never print in mid air", "[PurgeSupport][PurgeIntoInnerWalls][Regression]")
+TEST_CASE("Grown support walls taper down no faster than one ring per layer", "[PurgeSupport][PurgeIntoInnerWalls][Regression]")
 {
     const char *style = GENERATE("normal", "tree_hybrid");
     CAPTURE(style);
@@ -413,23 +413,59 @@ TEST_CASE("Grown support walls never print in mid air", "[PurgeSupport][PurgeInt
     size_t grown_regions = 0;
     for (const PrintObject *object : print.objects()) {
         const auto layers = object->support_layers();
-        std::vector<std::pair<BoundingBox, size_t>> above;
+        std::vector<SupportLayer::WallGrowth> above;
         for (size_t layer_idx = layers.size(); layer_idx-- > 0;) {
             const SupportLayer *layer = layers[layer_idx];
+            // One ring fewer per layer: a region reaches only as many layers
+            // down as it has rings, and each layer in between costs one.
             for (const auto &region : layer->purge_support_regions) {
                 const BoundingBox region_box = region.bbox();
                 if (!region_box.defined)
                     continue;
-                for (const auto &[upper_box, upper_rings] : above)
-                    if (region_box.overlap(upper_box))
-                        CHECK(region.grown_rings() >= upper_rings);
+                for (const SupportLayer::WallGrowth &upper : above)
+                    if (region_box.overlap(upper.box)) {
+                        const size_t distance = upper.layer_idx - layer_idx;
+                        CHECK(region.grown_rings() + distance >= upper.rings);
+                    }
             }
             for (const auto &region : layer->purge_support_regions)
                 if (region.grown_rings() > 0) {
+                    const BoundingBox region_box = region.bbox();
+                    if (!region_box.defined)
+                        continue;
                     ++grown_regions;
-                    above.emplace_back(region.bbox(), region.grown_rings());
+                    above.push_back({region_box, layer_idx, region.grown_rings()});
                 }
         }
     }
     CHECK(grown_regions > 0);
+}
+
+TEST_CASE("Support wall growth tapers one ring per layer downward", "[PurgeSupport][PurgeIntoInnerWalls]")
+{
+    const BoundingBox region({0, 0}, {100, 100});
+    const BoundingBox elsewhere({200, 200}, {300, 300});
+    // Layers are numbered bottom to top: layer 10 carries the spike, the walk
+    // reaches it from the layers below.
+    std::vector<SupportLayer::WallGrowth> above{{region, 10, 5}};
+    const auto required = [&above](size_t own_rings, const BoundingBox &box, size_t layer_idx) {
+        return SupportLayer::required_rings(own_rings, box, layer_idx, above);
+    };
+    // One ring fewer for every layer in between, until the spike has tapered out.
+    CHECK(required(0, region, 9) == 4);
+    CHECK(required(0, region, 8) == 3);
+    CHECK(required(0, region, 6) == 1);
+    CHECK(required(0, region, 5) == 0);
+    CHECK(required(0, region, 0) == 0);
+    // Existing growth is never taken back.
+    CHECK(required(3, region, 8) == 3);
+    // Non-overlapping regions are not lifted.
+    CHECK(required(0, elsewhere, 9) == 0);
+    // Every grown region above contributes; the most demanding one wins.
+    above.push_back({region, 12, 4});
+    CHECK(required(0, region, 11) == 3);
+    CHECK(required(0, region, 9) == 4); // layer 10: 5 - 1 beats layer 12: 4 - 3
+    CHECK(required(0, region, 8) == 3);
+    // An undefined area (no support here) never demands growth.
+    CHECK(required(0, BoundingBox(), 9) == 0);
 }

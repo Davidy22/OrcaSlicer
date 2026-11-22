@@ -32,6 +32,7 @@
 #include <limits>
 #include <cmath>
 #include "Config.hpp"
+#include "GCode/PurgeIntoInnerWalls.hpp"
 #include "MultiMaterialSegmentation.hpp"
 #include "ObjectID.hpp"
 
@@ -683,6 +684,28 @@ double SupportLayer::PurgeRegion::grow_to_ring_count(size_t min_rings)
     if (min_rings <= m_grown_rings || m_areas.empty() || m_flow.spacing() <= EPSILON)
         return 0.;
     return this->grow_impl(std::numeric_limits<double>::infinity(), min_rings);
+}
+
+// Grown walls taper out one ring per layer, so the layers below a wall spike
+// carry one ring less than the layer above until the extra walls are gone.
+// The walk visits every layer between the grown region and this one, so a
+// region separated by a gap (a roof/interface layer without a base fill, for
+// example) costs as many rings as there are layers in between.
+size_t SupportLayer::required_rings(size_t own_rings, const BoundingBox &region_box, size_t layer_idx,
+                                    const std::vector<WallGrowth> &grown_above)
+{
+    size_t required = own_rings;
+    if (!region_box.defined)
+        return required;
+    for (const WallGrowth &upper : grown_above) {
+        if (upper.layer_idx <= layer_idx)
+            continue;
+        const size_t distance = upper.layer_idx - layer_idx;
+        if (!region_box.overlap(upper.box))
+            continue;
+        required = std::max(required, PurgeIntoInnerWalls::tapered_rings(upper.rings, distance));
+    }
+    return required;
 }
 
 // March inward one ring at a time until the region carries min_rings walls

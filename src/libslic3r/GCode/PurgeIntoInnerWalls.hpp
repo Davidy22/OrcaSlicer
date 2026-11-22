@@ -14,6 +14,53 @@
 
 namespace Slic3r::PurgeIntoInnerWalls {
 
+// Grown purge walls taper out downward: the layer below a wall spike carries
+// one ring fewer for every layer in between, so the extra capacity fades out
+// instead of running the full height of the object or of its supports. Both
+// the model wall growth (PrintObject::make_perimeters()) and the support wall
+// growth (Print::_plan_purge_into_inner_walls()) apply exactly this rule; it
+// lives here so the two paths cannot drift apart.
+template<typename T>
+inline T tapered_rings(T rings, T layers_between)
+{
+    return rings > layers_between ? rings - layers_between : T(0);
+}
+
+// Visits every toolchange of a layer's filament sequence in print order.
+// `previous` is the filament the layer starts with (-1 when unknown, for the
+// first layer or an object whose entry filament no one tracked) and is left
+// at the layer's last filament so the caller carries it into the next object
+// or layer. Repeating the same filament is not a toolchange.
+//
+// Every place that sizes purge capacity - the demand-driven growth of model
+// walls and support walls, the proportional reduction at allocation time, and
+// the allocation itself - walks a layer this way. Keeping the walk here keeps
+// those four estimates consistent with each other.
+template<typename Extruders, typename F>
+inline void for_each_toolchange(const Extruders &extruders, int &previous, F &&fn)
+{
+    for (const unsigned int filament : extruders) {
+        if (previous >= 0 && filament != (unsigned int) previous)
+            fn((unsigned int) previous, filament);
+        previous = (int) filament;
+    }
+}
+
+// Flush volume of the toolchanges a layer can purge, in print order.
+// `volume_at(from, to)` supplies the directional estimate and returns 0 for a
+// pair the configuration forbids purging between. The accumulator type is
+// explicit at the call site so each estimator keeps summing in the precision
+// it used before.
+template<typename Volume, typename Extruders, typename VolumeAt>
+inline Volume purge_demand(const Extruders &extruders, int &previous, VolumeAt &&volume_at)
+{
+    Volume demand = Volume(0);
+    for_each_toolchange(extruders, previous, [&demand, &volume_at](unsigned int from, unsigned int to) {
+        demand += volume_at(from, to);
+    });
+    return demand;
+}
+
 // Sample the closed loop by arc length, not vertex index: a long straight
 // wall must be as likely a target as the same wall split into many segments.
 // Prefer the masked edges if any have length; otherwise use the whole loop.
