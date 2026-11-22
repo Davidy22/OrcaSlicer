@@ -919,8 +919,7 @@ TEST_CASE("Purge keeps the loop behind a claimed wall in its own color", "[Purge
     FilamentChangeStats stats;
     CHECK_THAT(wiping.mark_wiping_extrusions(print, 0, 3, 0.5f, stats), Catch::Matchers::WithinAbs(0., 1e-5));
     CHECK(wiping.get_extruder_override(nearest, preferred, 0) < 0);
-    // Unclaimed loops use LayerTools' native routing, not a wiping override.
-    // The boundary loop keeps its own filament (2 -> index 1), not the exterior's.
+    // The unclaimed loop keeps inner-wall filament 2 (index 1).
     CHECK(tools.extruder(*nearest, region) == 1);
 }
 
