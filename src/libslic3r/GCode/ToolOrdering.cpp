@@ -3508,6 +3508,13 @@ bool WipingExtrusions::can_purge(const PrintConfig &config, unsigned int old_ext
            !config.filament_is_support.get_at(old_extruder) && !config.filament_is_support.get_at(new_extruder);
 }
 
+bool WipingExtrusions::purge_object_before(const PrintObject *a, const PrintObject *b)
+{
+    const bool a_preferred = a->config().purge_into_inner_walls_preferred.getBool();
+    const bool b_preferred = b->config().purge_into_inner_walls_preferred.getBool();
+    return a_preferred != b_preferred ? a_preferred : a->id() < b->id();
+}
+
 int WipingExtrusions::get_extruder_override(const ExtrusionEntity* entity, const PrintObject* object, size_t copy_id) const
 {
     const auto it = entity_map.find(std::make_tuple(entity, object));
@@ -3562,14 +3569,7 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         // Deterministic object order for equal-priority loops and support fallback.
         // Wall allocation below compares loop volumes across all objects.
         ConstPrintObjectPtrs purge_object_list = print.objects().vector();
-        std::sort(purge_object_list.begin(), purge_object_list.end(), [](const PrintObject* a, const PrintObject* b) {
-            bool a_preferred = a->config().purge_into_inner_walls_preferred.getBool();
-            bool b_preferred = b->config().purge_into_inner_walls_preferred.getBool();
-            if (a_preferred != b_preferred) {
-                return a_preferred;  // true comes before false
-            }
-            return a->id() < b->id();
-        });
+        std::sort(purge_object_list.begin(), purge_object_list.end(), purge_object_before);
 
         // Proportional reduction: if this layer's inner walls/supports cannot absorb
         // the layer's total purge demand even after the demand-driven wall
@@ -3581,13 +3581,12 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         // layer's first toolchange, before any of its walls are overridden.
         if (m_purge_layer_scale < 0.f) {
             const float capacity = purge_capacity(print, unsigned(m_purge_initial_extruder));
-            float layer_demand = 0.f;
-            unsigned int prev_extruder = unsigned(m_purge_initial_extruder);
-            for (const unsigned int extruder_id : lt.extruders) {
-                if (can_purge(print.config(), prev_extruder, extruder_id))
-                    layer_demand += estimate_flush_volume(print.config(), prev_extruder, extruder_id);
-                prev_extruder = extruder_id;
-            }
+            int prev_extruder = m_purge_initial_extruder;
+            const float layer_demand = PurgeIntoInnerWalls::purge_demand<float>(lt.extruders, prev_extruder,
+                [&print](unsigned int from, unsigned int to) {
+                    return WipingExtrusions::can_purge(print.config(), from, to)
+                        ? estimate_flush_volume(print.config(), from, to) : 0.f;
+                });
             m_purge_layer_scale = layer_demand > 0.f ? std::min(1.f, capacity / layer_demand) : 1.f;
         }
         float remaining = requested_volume * m_purge_layer_scale;

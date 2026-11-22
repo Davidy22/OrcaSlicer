@@ -325,7 +325,9 @@ class SupportLayer : public Layer
 public:
     // Growth/replanning state for existing support-fill groups, shared by normal and tree supports.
     // No outer-wall reservation: the stack (redrawn outer walls included) is
-    // purgeable; grown-ring counts let the layers below be lifted to match.
+    // purgeable; grown-ring counts let the layers below be lifted to one ring
+    // fewer per layer, so a wall spike tapers out instead of printing
+    // full-height extra walls.
     class PurgeRegion
     {
     public:
@@ -348,6 +350,23 @@ public:
         size_t m_grown_rings = 0;
         std::unique_ptr<ExtrusionEntityCollection> m_original;
     };
+
+    // Grown-wall state of a support layer region, kept by the downward
+    // propagation in Print::_plan_purge_into_inner_walls(). Grown walls taper
+    // out one ring per layer, so a region only reaches as many layers down as
+    // it has rings.
+    struct WallGrowth
+    {
+        BoundingBox box;
+        size_t      layer_idx;
+        size_t      rings;
+    };
+
+    // Rings a region at layer_idx must carry to stay under the grown regions
+    // above it: every grown region overlapping it requires one ring fewer per
+    // layer in between, and never fewer rings than the region already has.
+    static size_t required_rings(size_t own_rings, const BoundingBox &region_box, size_t layer_idx,
+                                 const std::vector<WallGrowth> &grown_above);
 
     // Polygons covered by the supports: base, interface and contact areas.
     // Used to suppress retraction if moving for a support extrusion over these support_islands.

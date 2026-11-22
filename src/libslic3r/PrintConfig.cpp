@@ -8503,7 +8503,7 @@ void PrintConfigDef::init_fff_params()
         "If model inner walls cannot absorb the full purge volume, support walls and fill are used next, including outer support walls. "
         "Support wall loops are increased only for the remaining demand, and only on the objects that receive extra model walls, "
         "until it fits or the support is solid. "
-        "Layers below receive at least as many support walls as the layer above, so grown support walls never print in mid air. "
+        "Extra loops taper out downward, one loop fewer per layer, so they do not run down the full height of the object or of its supports. "
         "If the available volume is still insufficient, purge volume is reduced and color bleeding may occur. "
         "Soluble and dedicated support filaments are not used for purging.");
     def->mode = comSimple;

@@ -11,6 +11,7 @@
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/GCode/PurgeIntoInnerWalls.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
@@ -534,6 +535,56 @@ TEST_CASE("Inner-wall purge rejects only active competing belt purge planners", 
         CHECK(validation.opt_key == "purge_into_inner_walls");
     } else
         CHECK(validation.string.empty());
+}
+
+TEST_CASE("Purge demand walks a layer's toolchanges once", "[PurgeIntoInnerWalls]")
+{
+    // The shared walk behind every purge capacity estimate: model wall growth,
+    // support wall growth, proportional reduction and allocation marking.
+    std::vector<std::pair<unsigned int, unsigned int>> seen;
+    const auto collect = [&seen](unsigned int from, unsigned int to) { seen.emplace_back(from, to); };
+
+    // An unknown entry filament has nothing to change from, so the first
+    // filament is not a toolchange; consecutive repeats are not either.
+    int previous = -1;
+    PurgeIntoInnerWalls::for_each_toolchange(std::vector<unsigned int>{1, 2, 2, 1}, previous, collect);
+    CHECK(previous == 1);
+    REQUIRE(seen.size() == 2);
+    CHECK(seen[0] == std::make_pair(1u, 2u));
+    CHECK(seen[1] == std::make_pair(2u, 1u));
+
+    // The walk carries the last filament across calls, like the objects of one
+    // layer or the layers of a print, and an empty sequence changes nothing.
+    seen.clear();
+    PurgeIntoInnerWalls::for_each_toolchange(std::vector<unsigned int>{1, 3}, previous, collect);
+    PurgeIntoInnerWalls::for_each_toolchange(std::vector<unsigned int>{}, previous, collect);
+    REQUIRE(seen.size() == 1);
+    CHECK(seen[0] == std::make_pair(1u, 3u));
+    CHECK(previous == 3);
+
+    // Summed demand skips pairs the configuration forbids, and leaves the
+    // running filament where the caller expects it.
+    const auto volume_at = [](unsigned int from, unsigned int to) {
+        return (from == 2 && to == 3) ? 0.f : 10.f;
+    };
+    int running = 0;
+    CHECK(PurgeIntoInnerWalls::purge_demand<float>(std::vector<unsigned int>{0, 1, 1, 2, 3}, running, volume_at) == 20.f);
+    CHECK(running == 3);
+    running = 2;
+    CHECK(PurgeIntoInnerWalls::purge_demand<double>(std::vector<unsigned int>{2, 3}, running, volume_at) == 0.);
+    CHECK(running == 3);
+}
+
+TEST_CASE("Grown purge walls taper one ring per layer", "[PurgeIntoInnerWalls]")
+{
+    // The single rule behind both the model wall growth and the support wall
+    // growth: one ring fewer for every layer in between, never negative.
+    CHECK(PurgeIntoInnerWalls::tapered_rings(5, 1) == 4);
+    CHECK(PurgeIntoInnerWalls::tapered_rings(5, 4) == 1);
+    CHECK(PurgeIntoInnerWalls::tapered_rings(5, 5) == 0);
+    CHECK(PurgeIntoInnerWalls::tapered_rings(5, 9) == 0);
+    CHECK(PurgeIntoInnerWalls::tapered_rings(0, 1) == 0);
+    CHECK(PurgeIntoInnerWalls::tapered_rings(size_t(3), size_t(2)) == 1);
 }
 
 TEST_CASE("Inner-wall purge declines geometry caches before changing generated layers", "[PurgeIntoInnerWalls][Regression]")

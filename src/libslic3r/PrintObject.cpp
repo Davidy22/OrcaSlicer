@@ -720,13 +720,11 @@ void PrintObject::make_perimeters()
             // This object's share of each layer's purge demand: the total
             // demand of a layer is the sum of the flush volumes of its
             // toolchanges (in print order, estimate only) and is split evenly
-            // between the objects growing loops on that layer (prioritized
-            // ones, or all objects when none is prioritized). Whatever is
-            // still missing at allocation time falls back to other objects'
-            // existing walls and then to proportional reduction (with a
-            // warning), so an over-estimate only costs extra walls.
+            // between the objects printing that layer. Whatever is still
+            // missing at allocation time falls back to other objects' existing
+            // walls and then to proportional reduction (with a warning), so an
+            // over-estimate only costs extra walls.
             std::vector<float> demand(m_layers.size(), 0.f);
-            std::vector<std::map<unsigned int, float>> demand_by_filament(m_layers.size());
             {
                 const auto &objects = m_print->objects();
                 int prev_filament = -1;
@@ -739,9 +737,10 @@ void PrintObject::make_perimeters()
                         if (layer == nullptr)
                             continue;
                         ++preferred_count;
-                        for (const unsigned int filament : layer_filament_sequence(layer)) {
-                            if (prev_filament >= 0 && (int) filament != prev_filament
-                                && WipingExtrusions::can_purge(purge_cfg, (unsigned int) prev_filament, filament)) {
+                        PurgeIntoInnerWalls::for_each_toolchange(layer_filament_sequence(layer), prev_filament,
+                            [&](unsigned int from, unsigned int to) {
+                                if (!WipingExtrusions::can_purge(purge_cfg, from, to))
+                                    return;
                                 // The flush matrix is directional and this
                                 // sequence only approximates the real toolpath
                                 // order, so size the walls for the more
@@ -749,27 +748,22 @@ void PrintObject::make_perimeters()
                                 // extra native walls; under-estimating would
                                 // hand the volume to support instead.
                                 const float volume = std::max(
-                                    estimate_flush_volume(purge_cfg, (unsigned int) prev_filament, filament),
-                                    estimate_flush_volume(purge_cfg, filament, (unsigned int) prev_filament));
+                                    estimate_flush_volume(purge_cfg, from, to),
+                                    estimate_flush_volume(purge_cfg, to, from));
                                 layer_demand += volume;
-                                demand_by_filament[layer_idx][filament] += volume;
-                            }
-                            prev_filament = (int) filament;
-                        }
+                            });
                     }
-                    if (preferred_count > 0) {
+                    if (preferred_count > 0)
                         demand[layer_idx] = layer_demand / float(preferred_count);
-                        for (auto &[filament, volume] : demand_by_filament[layer_idx])
-                            volume /= float(preferred_count);
-                    }
                 }
             }
 
             std::vector<int>   extra_loops(m_layers.size(), 0), applied_loops(m_layers.size(), 0);
             std::vector<float> measured(m_layers.size(), 0.f);
-            auto measure_layer = [this, num_copies, &demand_by_filament](size_t layer_idx) {
+            // Candidate purge volume of the layer, counting every copy: a shared
+            // layer is generated once but printed by each recipient.
+            auto measure_layer = [this, num_copies](size_t layer_idx) {
                 float volume = 0.f;
-                // Purge walls are inner walls, so the color a shell loop already
                 for (const auto &candidate : m_layers[layer_idx]->purge_inner_walls())
                     volume += float(candidate.wall.collection->total_volume()) * num_copies;
                 return volume;
@@ -815,11 +809,13 @@ void PrintObject::make_perimeters()
                         changed = true;
                     }
                 }
-                // Downward support propagation: the layer below must carry
-                // at least (extra loops of the layer above - 1), so a
-                // purge-driven spike in wall count never prints into air.
+                // Downward propagation: grown walls taper out one loop per
+                // layer, so a purge-driven spike in wall count neither prints
+                // into air nor runs the full height of the object. The rule is
+                // shared with the support wall growth, see
+                // PurgeIntoInnerWalls::tapered_rings().
                 for (size_t layer_idx = m_layers.size() - 1; layer_idx-- > 0;) {
-                    const int needed = extra_loops[layer_idx + 1] - 1;
+                    const int needed = PurgeIntoInnerWalls::tapered_rings(extra_loops[layer_idx + 1], 1);
                     if (extra_loops[layer_idx] < needed) {
                         extra_loops[layer_idx] = needed;
                         changed = true;
