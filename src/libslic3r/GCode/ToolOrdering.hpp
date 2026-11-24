@@ -71,6 +71,18 @@ public:
 
     void ensure_perimeters_infills_order(const Print& print);
 
+    // Purge into inner walls: the layer's entry filament. Print::_wipe_purge_at_
+    // toolchanges() decides the allocation order of the layer's transitions
+    // before serving any of them, so the entry filament cannot be inferred from
+    // whichever transition happens to be served first.
+    void set_purge_initial_extruder(int extruder) { m_purge_initial_extruder = extruder; }
+
+    // Purge into inner walls: true when an inner wall of this layer already
+    // prints `new_extruder`, on the loop itself or on its region's exterior, so
+    // the transition can be served without repainting anything. Such transitions
+    // are allocated before the ones that can only burn a foreign region's walls.
+    bool has_matching_target(const Print& print, unsigned int new_extruder) const;
+
     bool is_overriddable(const ExtrusionEntityCollection& ee, const PrintConfig& print_config, const PrintObject& object, const PrintRegion& region) const;
     bool is_overriddable_and_mark(const ExtrusionEntityCollection& ee, const PrintConfig& print_config, const PrintObject& object, const PrintRegion& region) {
     	bool out = this->is_overriddable(ee, print_config, object, region);

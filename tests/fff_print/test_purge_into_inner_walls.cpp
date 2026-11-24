@@ -645,7 +645,7 @@ TEST_CASE("Inner-wall purge warns only for a measured shortfall without a print-
     CHECK(warning.level == PrintStateBase::WarningLevel::NOTIFICATION_ONLY);
 }
 
-TEST_CASE("Purge allocation ranks preferred objects then loop volumes across objects", "[PurgeIntoInnerWalls][Regression]")
+TEST_CASE("Purge allocation ranks preferred objects then loop depth across objects", "[PurgeIntoInnerWalls][Regression]")
 {
     const char *generator = GENERATE("classic", "arachne");
     const bool first_preferred = GENERATE(false, true);
@@ -663,8 +663,9 @@ TEST_CASE("Purge allocation ranks preferred objects then loop volumes across obj
     TriangleMesh second = make_cube(20., 20., 1.);
     second.translate(120.f, 40.f, 0.f);
     // Both objects print in filament 1 while the incoming changes are 2 and 3,
-    // so every loop is foreign to every change and the volume key alone decides
-    // the order inside a tier. Color matching has its own test below.
+    // so every loop is foreign to every change and the depth key decides the
+    // order inside a tier, with volume only breaking equal-depth ties. Color
+    // matching has its own test below.
     const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
         {{"extruder", 1}, {"purge_into_inner_walls_preferred", first_preferred}},
         {{"extruder", 1}, {"purge_into_inner_walls_preferred", second_preferred}},
@@ -688,7 +689,8 @@ TEST_CASE("Purge allocation ranks preferred objects then loop volumes across obj
     LayerTools tools(a->layers()[1]->print_z);
     // Both incoming colors are foreign to both models, so native shells must
     // remain protected while the four available inner-wall copies are claimed.
-    // Every claim is therefore a best-fit claim inside a foreign tier.
+    // Every claim is therefore inside a foreign tier, which hands out its
+    // deepest loop first.
     tools.extruders = {2, 3, 2, 3};
     WipingExtrusions &wiping = tools.wiping_extrusions();
     std::vector<std::vector<const ExtrusionEntityCollection *>> walls(2);
@@ -715,17 +717,38 @@ TEST_CASE("Purge allocation ranks preferred objects then loop volumes across obj
         const PrintObject *object;
         size_t copy;
     };
-    const Claim large{walls[0][0], a, 0}, small_wall{walls[0][1], a, 0};
-    const Claim medium_first{walls[1][0], b, 0}, medium_second{walls[1][0], b, 1};
     // Every wall is larger than the 1 mm3 a single transition asks for, so each
-    // transition claims exactly one loop and the volume key picks the smallest
-    // one that can still absorb it. Inside a foreign tier that is ascending
-    // volume, so loops of both objects interleave; the preference tiers
-    // themselves keep the priority order.
-    std::vector<Claim> expected{small_wall, medium_first, medium_second, large};
-    if (first_preferred != second_preferred)
-        expected = first_preferred ? std::vector<Claim>{small_wall, large, medium_first, medium_second} :
-                                     std::vector<Claim>{medium_first, medium_second, small_wall, large};
+    // transition claims exactly one loop. The claim order is the documented one
+    // (see PurgeIntoInnerWalls::wall_before()): the per-object preference tier
+    // first, then depth across all objects, so the deepest loop of the layer
+    // goes before a smaller loop that merely sits near a visible wall, then the
+    // smaller loop, then object and copy order. Restated here rather than called
+    // so the test pins the rule instead of the implementation.
+    std::vector<Claim> expected;
+    for (const PrintObject *object : print.objects()) {
+        const Layer *layer = object->get_layer_at_printz(tools.print_z, EPSILON);
+        REQUIRE(layer != nullptr);
+        for (const auto &candidate : layer->purge_inner_walls()) {
+            const auto *wall = candidate.wall.collection;
+            if (!wiping.is_overriddable(*wall, print.config(), *object, candidate.region->region()))
+                continue;
+            for (size_t copy = 0; copy < object->instances().size(); ++copy)
+                expected.push_back({wall, object, copy});
+        }
+    }
+    REQUIRE(expected.size() == 4);
+    const auto preferred = [](const Claim &claim) {
+        return claim.object->config().purge_into_inner_walls_preferred.getBool();
+    };
+    std::stable_sort(expected.begin(), expected.end(), [&preferred](const Claim &x, const Claim &y) {
+        if (preferred(x) != preferred(y))
+            return preferred(x);
+        if (x.wall->get_max_inset_idx() != y.wall->get_max_inset_idx())
+            return x.wall->get_max_inset_idx() > y.wall->get_max_inset_idx(); // deepest first
+        if (x.wall->is_existing_purge_wall() != y.wall->is_existing_purge_wall())
+            return x.wall->is_existing_purge_wall();                          // reuse before generated
+        return x.wall->total_volume() < y.wall->total_volume();               // then the smaller loop
+    });
 
     FilamentChangeStats stats;
     unsigned int previous = 0;
@@ -790,7 +813,8 @@ TEST_CASE("Purge claims the loop nearest a matching exterior before a smaller lo
     REQUIRE(nearest_inset > 0);
     REQUIRE(nearest_wall != nullptr);
     // Concentric loops shrink inward, so the loop nearest the exterior is the
-    // largest one while best fit prefers the smallest loop it can get away with.
+    // largest one while a foreign tier claims its innermost, smallest loop
+    // first.
     REQUIRE(nearest_wall->total_volume() > smallest_volume);
 
     // Small enough for every loop to absorb a change on its own, so one claim
@@ -799,7 +823,8 @@ TEST_CASE("Purge claims the loop nearest a matching exterior before a smaller lo
     FilamentChangeStats stats;
 
     // A foreign change must not repaint the loop beside the visible boundary:
-    // there the volume fit still takes the smallest loop that absorbs it.
+    // the claim starts at the innermost loop, which here is also the smallest
+    // one and big enough to absorb the whole change.
     CHECK_THAT(wiping.mark_wiping_extrusions(print, 0, 2, demand, stats), Catch::Matchers::WithinAbs(0., 1e-5));
     CHECK(wiping.get_extruder_override(nearest_wall, preferred, 0) < 0);
     size_t claims = 0;
@@ -817,8 +842,8 @@ TEST_CASE("Purge claims the loop nearest a matching exterior before a smaller lo
     CHECK(claims == 1);
 
     // A change into the exterior color is served by color adjacency first: the
-    // closest loop wins even though a smaller loop would have absorbed the purge
-    // equally well.
+    // closest loop wins even though a smaller, deeper loop comes earlier in a
+    // foreign tier.
     CHECK_THAT(wiping.mark_wiping_extrusions(print, 2, 0, demand, stats), Catch::Matchers::WithinAbs(0., 1e-5));
     CHECK(wiping.get_extruder_override(nearest_wall, preferred, 0) == 0);
 
@@ -972,6 +997,136 @@ TEST_CASE("Purge keeps the loop behind a claimed wall in its own color", "[Purge
     CHECK(wiping.get_extruder_override(nearest, preferred, 0) < 0);
     // The unclaimed loop keeps inner-wall filament 2 (index 1).
     CHECK(tools.extruder(*nearest, region) == 1);
+}
+
+TEST_CASE("Purge fills a foreign wall stack from the inside out", "[PurgeIntoInnerWalls][Regression]")
+{
+    const char *generator = GENERATE("classic", "arachne");
+    CAPTURE(generator);
+
+    // One object and one island keep the claim sequence readable: concentric
+    // loops and their insets line up one to one, so depth is unambiguous.
+    Model model;
+    Print print;
+    DynamicPrintConfig config = purge_config(generator, 4, false, 4);
+    config.set_deserialize_strict({{"prime_volume", 1.}});
+    TriangleMesh cube = make_cube(20., 20., 1.);
+    cube.translate(40.f, 40.f, 0.f);
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> overrides{
+        {{"extruder", 1}, {"purge_into_inner_walls_preferred", true}},
+    };
+    Test::init_print(std::vector<TriangleMesh>{cube}, print, model, config, &overrides, false);
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject *object = print.objects().front();
+    REQUIRE(object->layers().size() > 1);
+    const Layer *layer = object->layers()[1];
+    REQUIRE(layer->regions().size() == 1);
+    const PrintRegion &region = layer->regions().front()->region();
+
+    LayerTools tools(layer->print_z);
+    tools.extruders = {3}; // foreign to the walls and to the exterior
+    WipingExtrusions &wiping = tools.wiping_extrusions();
+
+    std::vector<const ExtrusionEntityCollection *> walls;
+    for (const auto &candidate : layer->purge_inner_walls())
+        if (wiping.is_overridable(*candidate.wall.collection, print.config(), *object, region))
+            walls.push_back(candidate.wall.collection);
+    REQUIRE(walls.size() >= 3);
+    // Premise: the loop stack prints a filament the incoming flush is foreign
+    // to, so the change runs through the foreign tier.
+    for (const ExtrusionEntityCollection *wall : walls)
+        REQUIRE(tools.extruder(*wall, region) != 3);
+
+    // The claim order is by depth, so the innermost loop comes first. It is also
+    // the smallest one, which keeps the premise simple: a demand slightly above
+    // its volume cannot be served by that one loop alone.
+    std::map<int, double> volume_at_inset;
+    for (const ExtrusionEntityCollection *wall : walls)
+        volume_at_inset[wall->get_max_inset_idx()] += wall->total_volume();
+    REQUIRE(volume_at_inset.size() >= 3);
+    const auto deepest = volume_at_inset.rbegin(); // largest inset = innermost loop
+    REQUIRE(deepest->first > volume_at_inset.begin()->first);
+    REQUIRE(deepest->second < volume_at_inset.begin()->second);
+
+    // More than the innermost loop holds, so one loop cannot serve the flush and
+    // the next loop in the stack has to.
+    FilamentChangeStats stats;
+    CHECK_THAT(wiping.mark_wiping_extrusions(print, 0, 3, float(1.2 * deepest->second), stats),
+               Catch::Matchers::WithinAbs(0., 1e-5));
+
+    // The claims are the deepest loops, in order and with no gap: the purge
+    // color is one contiguous band and the loops beside the visible boundary
+    // still print the walls' filament. Fitting each remainder on its own would
+    // leave a native loop inside the band instead.
+    std::vector<int> claimed;
+    std::vector<int> available;
+    for (const ExtrusionEntityCollection *wall : walls) {
+        available.push_back(wall->get_max_inset_idx());
+        if (wiping.get_extruder_override(wall, object, 0) >= 0)
+            claimed.push_back(wall->get_max_inset_idx());
+    }
+    REQUIRE(claimed.size() >= 2);
+    std::sort(claimed.rbegin(), claimed.rend());
+    std::sort(available.rbegin(), available.rend());
+    CHECK(std::equal(claimed.begin(), claimed.end(), available.begin()));
+    CHECK(claimed.size() < available.size());
+}
+
+TEST_CASE("Purge spots a transition its walls already print the color for", "[PurgeIntoInnerWalls][Regression]")
+{
+    const char *generator = GENERATE("classic", "arachne");
+    CAPTURE(generator);
+
+    Model model;
+    Print print;
+    DynamicPrintConfig config = purge_config(generator, 4, false, 4);
+    config.set_deserialize_strict({{"prime_volume", 1.}});
+    init_purge_print(print, model, config, true, 1);
+    print.process();
+    REQUIRE(print.objects().size() == 2);
+    const PrintObject *object = print.objects().front();
+    REQUIRE(object->layers().size() > 1);
+    const Layer *layer = object->layers()[1];
+    REQUIRE(layer->regions().size() == 1);
+    const PrintRegion &region = layer->regions().front()->region();
+
+    LayerTools tools(layer->print_z);
+    tools.extruders = {0, 1, 2, 3};
+    WipingExtrusions &wiping = tools.wiping_extrusions();
+
+    // The layer's allocation order is decided before any transition is served,
+    // so a transition that would have to repaint a foreign wall has to be told
+    // apart from one that can use a wall already printing its color. This
+    // predicate makes that split, and it must agree with the allocator's own
+    // matching rule.
+    const auto &candidates = layer->purge_inner_walls();
+    REQUIRE(!candidates.empty());
+    std::set<unsigned int> printed;
+    for (const auto &candidate : candidates) {
+        const unsigned int own = unsigned(tools.extruder(*candidate.wall.collection, region));
+        CAPTURE(own);
+        CHECK(wiping.has_matching_target(print, own));
+        printed.insert(own);
+    }
+    // A region's exterior color counts as well, on every object of the layer.
+    for (const PrintObject *layer_object : print.objects()) {
+        const Layer *object_layer = layer_object->get_layer_at_printz(tools.print_z, EPSILON);
+        REQUIRE(object_layer != nullptr);
+        for (const LayerRegion *layerm : object_layer->regions()) {
+            const unsigned int exterior = unsigned(tools.wall_extruder_id(layerm->region()));
+            CAPTURE(exterior);
+            CHECK(wiping.has_matching_target(print, exterior));
+            printed.insert(exterior);
+        }
+    }
+    // A filament nothing on the layer prints can only be served by repainting a
+    // foreign wall, so that transition belongs to the second pass.
+    unsigned int foreign = 0;
+    while (printed.count(foreign) != 0)
+        ++foreign;
+    CAPTURE(foreign);
+    CHECK_FALSE(wiping.has_matching_target(print, foreign));
 }
 
 TEST_CASE("Only purged inner wall seams scatter across layers and copies", "[PurgeIntoInnerWalls][Regression]")

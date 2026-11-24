@@ -395,13 +395,9 @@ TEST_CASE("Purge wall tiers put preferred objects then matching exterior colors 
     CHECK(wall_depth_priority(false, 2, true) > wall_depth_priority(false, 2, false));
 }
 
-TEST_CASE("Purge wall color matching outranks the volume fit inside a tier", "[PurgeIntoInnerWalls][Regression]")
+TEST_CASE("Purge wall order keeps the purge run contiguous inside a tier", "[PurgeIntoInnerWalls][Regression]")
 {
     using PurgeIntoInnerWalls::wall_before;
-    using PurgeIntoInnerWalls::pick_next_claim;
-    const auto volumes = [](std::vector<float> values) {
-        return [values = std::move(values)](size_t index) { return values.at(index); };
-    };
 
     // A matching tier is claimed by distance to its own exterior, not by how
     // well a loop is sized: the wall the purge color continues through is worth
@@ -414,40 +410,42 @@ TEST_CASE("Purge wall color matching outranks the volume fit inside a tier", "[P
     CHECK(wall_before(true, 2, false, 10.f, true, 2, false, 20.f));
     CHECK(wall_before(true, 2, true, 20.f, true, 2, false, 10.f));
 
-    // A foreign tier keeps best-fit volume ordering, deepest loop first on ties.
+    // A foreign tier is ordered deepest loop first, so the purge is claimed at
+    // the centre and grows outwards.
     CHECK(wall_before(false, 6, false, 10.f, false, 1, false, 20.f));
     CHECK(wall_before(false, 6, false, 10.f, false, 1, false, 10.f));
     CHECK_FALSE(wall_before(false, 1, false, 10.f, false, 6, false, 10.f));
+    // Depth outranks volume. Volume is only a proxy for depth inside one island,
+    // so a large deep loop must still go before a smaller loop that merely sits
+    // near a visible wall - otherwise the purge lands in the smallest object's
+    // boundary shell first.
+    CHECK(wall_before(false, 3, false, 900.f, false, 1, false, 10.f));
+    CHECK_FALSE(wall_before(false, 1, false, 10.f, false, 3, false, 900.f));
+    // Equal depth falls back to the smaller loop, then to reusing an existing
+    // wall over a purge-generated one.
+    CHECK(wall_before(false, 2, false, 10.f, false, 2, false, 20.f));
+    CHECK(wall_before(false, 2, true, 20.f, false, 2, false, 10.f));
 
-    // The claim picker never reorders a matching tier...
-    CHECK(pick_next_claim(4, true, volumes({2.f, 5.f, 40.f, 100.f}), 30.f) == 0);
-    // ...but best-fits a foreign one.
-    CHECK(pick_next_claim(4, false, volumes({2.f, 5.f, 40.f, 100.f}), 30.f) == 2);
-    // An exhausted tier reports `count`, never a claimable slot.
-    CHECK(pick_next_claim(0, true, volumes({}), 30.f) == 0);
-    CHECK(pick_next_claim(0, false, volumes({}), 30.f) == 0);
-}
-
-TEST_CASE("Purge fills the smallest foreign wall that absorbs the remainder", "[PurgeIntoInnerWalls][Regression]")
-{
-    using PurgeIntoInnerWalls::pick_volume_fit;
-    // Ascending volumes, as the allocator keeps a foreign tier. A matching tier
-    // is claimed in color order instead, see pick_next_claim().
-    const auto volumes = [](std::vector<float> values) {
-        return [values = std::move(values)](size_t index) { return values.at(index); };
+    // Both tiers are consumed front to back and every claim is kept, so a flush
+    // covers a prefix of that order. A pick that jumped to the loop that fits
+    // the remainder best would leave a foreign loop inside the purged band,
+    // which is the banding this ordering exists to avoid.
+    const std::vector<float> tier_order{2.f, 5.f, 40.f, 100.f}; // as wall_before() left it
+    const auto claims_for = [&tier_order](float remaining) {
+        std::vector<float> claimed;
+        for (float volume : tier_order) {
+            if (remaining <= 0.f)
+                break;
+            claimed.push_back(volume);
+            remaining -= volume;
+        }
+        return claimed;
     };
-    // The smallest loop that can absorb the whole remainder wins, so a small
-    // flush never burns a large wall.
-    CHECK(pick_volume_fit(4, volumes({2.f, 5.f, 40.f, 100.f}), 30.f) == 2);  // 40
-    CHECK(pick_volume_fit(4, volumes({2.f, 5.f, 40.f, 100.f}), 5.f) == 1);   // exact fit
-    CHECK(pick_volume_fit(4, volumes({2.f, 5.f, 40.f, 100.f}), 1.f) == 0);   // smallest available
-    CHECK(pick_volume_fit(4, volumes({2.f, 5.f, 40.f, 100.f}), 0.f) == 0);
-    // Nothing absorbs the remainder: fall back to the largest loop so packing
-    // converges instead of stalling on the smallest.
-    CHECK(pick_volume_fit(3, volumes({2.f, 5.f, 40.f}), 100.f) == 2);
-    CHECK(pick_volume_fit(3, volumes({2.f, 5.f, 40.f}), 40.5f) == 2);
-    // No candidates left.
-    CHECK(pick_volume_fit(0, volumes({}), 10.f) == 0);
+    // Braced lists hold commas, so the comparisons are parenthesised.
+    CHECK((claims_for(1.f) == std::vector<float>{2.f}));
+    CHECK((claims_for(2.f) == std::vector<float>{2.f})); // exactly absorbed, nothing else taken
+    CHECK((claims_for(30.f) == std::vector<float>{2.f, 5.f, 40.f})); // no jump to the 40 alone
+    CHECK((claims_for(100.f) == std::vector<float>{2.f, 5.f, 40.f, 100.f}));
 }
 
 TEST_CASE("Purge wall speed ramps without exceeding existing speed or flow limits", "[PurgeIntoInnerWalls][Regression]")
