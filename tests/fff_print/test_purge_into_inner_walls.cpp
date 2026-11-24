@@ -1030,7 +1030,7 @@ TEST_CASE("Purge fills a foreign wall stack from the inside out", "[PurgeIntoInn
 
     std::vector<const ExtrusionEntityCollection *> walls;
     for (const auto &candidate : layer->purge_inner_walls())
-        if (wiping.is_overridable(*candidate.wall.collection, print.config(), *object, region))
+        if (wiping.is_overriddable(*candidate.wall.collection, print.config(), *object, region))
             walls.push_back(candidate.wall.collection);
     REQUIRE(walls.size() >= 3);
     // Premise: the loop stack prints a filament the incoming flush is foreign

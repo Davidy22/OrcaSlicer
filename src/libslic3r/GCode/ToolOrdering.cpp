@@ -844,7 +844,7 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
     	for (; it_per_layer_extruder_override != per_layer_extruder_switches.end() && it_per_layer_extruder_override->first < layer->print_z + EPSILON; ++ it_per_layer_extruder_override)
     		extruder_override = (int)it_per_layer_extruder_override->second;
 
-        // Store the current extruder override (set to zero if no overriden), so that layer_tools.wiping_extrusions().is_overridable_and_mark() will use it.
+        // Store the current extruder override (set to zero if no overriden), so that layer_tools.wiping_extrusions().is_overriddable_and_mark() will use it.
         layer_tools.extruder_override = extruder_override;
 
         // Snapshot extruders before this object's regions to track new additions.
@@ -3889,7 +3889,7 @@ bool WipingExtrusions::has_matching_target(const Print &print, unsigned int new_
     for (const PrintObject *object : print.objects())
         if (const Layer *layer = object->get_layer_at_printz(lt.print_z, EPSILON))
             for (const auto &candidate : layer->purge_inner_walls())
-                if (this->is_overridable(*candidate.wall.collection, print.config(), *object, candidate.region->region()) &&
+                if (this->is_overriddable(*candidate.wall.collection, print.config(), *object, candidate.region->region()) &&
                     wall_matches_purge_color(lt, *candidate.wall.collection, candidate.region->region(), new_extruder))
                     return true;
     return false;
