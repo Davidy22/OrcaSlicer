@@ -3635,8 +3635,8 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         // Group loops into (object priority, exterior color) tiers across all
         // objects, not one whole object at a time, then order each tier with
         // wall_before(): matching walls by distance to their exterior, foreign
-        // walls by ascending volume. Equal keys keep deterministic object/copy
-        // order and shell reuse.
+        // walls deepest loop first, i.e. innermost. Equal keys keep
+        // deterministic object/copy order and shell reuse.
         std::stable_sort(candidates.begin(), candidates.end(), [](const PurgeCandidate& a, const PurgeCandidate& b) {
             const auto a_tier = PurgeIntoInnerWalls::wall_tier(a.preferred, a.matches_purge_color);
             const auto b_tier = PurgeIntoInnerWalls::wall_tier(b.preferred, b.matches_purge_color);
@@ -3649,11 +3649,17 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
         // Phase 1: model inner walls. Tiers run in wall_tier() order, so purge
         // asking for the color a region already prints on its exterior is
         // served before a foreign region loses a wall, and only then does the
-        // next tier get a turn. Within a tier the claim order is wall_before():
-        // matching walls go nearest-their-exterior first, so the color match
-        // wins over volume fitting; foreign walls are best-fit (see
-        // pick_volume_fit) rather than largest-first. The shell reservation
-        // below keeps every visible boundary native whichever loop was picked.
+        // next tier get a turn. Inside a tier the walls are claimed in
+        // wall_before() order, front to back, never re-picked: a matching tier
+        // works inwards from its own exterior, and a foreign tier works
+        // outwards from the deepest loop of every object. The two tiers
+        // therefore consume the stack from opposite ends, so a transition that
+        // runs early cannot take the shell another transition would have
+        // printed in its own exterior color - it can only take the inner loops.
+        // Both keep the purge color one contiguous run and the loops nearest a
+        // visible boundary out of it. The
+        // shell reservation below keeps every visible boundary native whichever
+        // loop was picked.
         const auto claim = [&](const PurgeCandidate& cand) {
             const size_t num_of_copies = cand.object->instances().size();
             set_extruder_override(cand.collection, cand.object, cand.copy, new_extruder, num_of_copies);
@@ -3673,22 +3679,18 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
             // Claimed loops are dropped from this list, which stays in
             // wall_before() order because the tier is sorted that way: ascending
             // volume for a foreign tier, nearest-exterior first for a matching
-            // one.
+            // one. Always taking the front keeps the claim run contiguous in
+            // that order; jumping to whichever loop fits the remainder best
+            // would interleave purge and native loops and band the walls.
             std::vector<size_t> unclaimed;
             unclaimed.reserve(tier_end - tier_begin);
             for (size_t i = tier_begin; i < tier_end; ++i)
                 if (!is_entity_overridden(candidates[i].collection, candidates[i].object, candidates[i].copy))
                     unclaimed.push_back(i);
 
-            const bool tier_matches = std::get<1>(tier_key);
             while (remaining > 0.f && !unclaimed.empty()) {
-                const size_t slot = PurgeIntoInnerWalls::pick_next_claim(
-                    unclaimed.size(), tier_matches,
-                    [&unclaimed, &candidates](size_t i) { return candidates[unclaimed[i]].volume; }, remaining);
-                if (slot >= unclaimed.size())
-                    break;
-                const size_t index = unclaimed[slot];
-                unclaimed.erase(unclaimed.begin() + static_cast<std::ptrdiff_t>(slot));
+                const size_t index = unclaimed.front();
+                unclaimed.erase(unclaimed.begin());
                 claim(candidates[index]);
             }
             tier_begin = tier_end;

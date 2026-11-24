@@ -119,67 +119,45 @@ inline auto wall_depth_priority(bool matches_purge_color, int inset_idx, bool ex
 
 // Claim order inside one tier: true when `a` comes before `b`.
 //
+// Both tiers are claimed strictly in this order, front to back, and the
+// allocator never re-picks a loop out of sequence. That is the point: the purge
+// color has to end up as one contiguous run. A pick that jumps back out to a
+// larger loop leaves a foreign loop sandwiched inside the purged band, which is
+// a color seam in the middle of the wall stack - visible as banding where the
+// interior of the part should hide the transition.
+//
 // A matching tier is ordered by color adjacency first - the loop nearest that
 // exterior is taken before any volume consideration, because a wall that
 // continues the purge color can neither bleed nor look wrong, so distance to
 // the surface outranks packing efficiency there. Volume only breaks equal-depth
 // ties.
 //
-// A foreign tier is ordered by ascending volume, which is also the scan order
-// pick_volume_fit() needs, with the deepest loop first at equal volume.
+// A foreign tier is ordered by depth first, deepest loop first, and volume only
+// breaks equal-depth ties. Depth has to outrank volume because volume is only a
+// proxy for depth inside a single island: a small object's boundary loop can be
+// the smallest loop on the layer while a large object's deepest loop is much
+// bigger, so volume alone sends the purge back out to the visible wall of
+// whichever object has the tiniest loops. Depth is the property that actually
+// hides it, so the loop furthest from any visible surface is claimed first and
+// the band grows outwards from the centre. Ties also prefer reusing an existing
+// wall over a purge-generated one (see wall_depth_priority).
 inline bool wall_before(bool a_matches_purge_color, int a_inset, bool a_existing, float a_volume,
                         bool b_matches_purge_color, int b_inset, bool b_existing, float b_volume)
 {
     if (a_matches_purge_color != b_matches_purge_color)
         return a_matches_purge_color; // color adjacency outranks everything
-    if (a_matches_purge_color) {
-        const auto a_depth = wall_depth_priority(true, a_inset, a_existing);
-        const auto b_depth = wall_depth_priority(true, b_inset, b_existing);
-        return a_depth != b_depth ? a_depth > b_depth : a_volume < b_volume;
-    }
-    return a_volume != b_volume ? a_volume < b_volume :
-           wall_depth_priority(false, a_inset, a_existing) > wall_depth_priority(false, b_inset, b_existing);
+    // Both tiers compare the same way; wall_depth_priority() holds the only
+    // difference between them, namely which end of the stack counts as near.
+    const auto a_depth = wall_depth_priority(a_matches_purge_color, a_inset, a_existing);
+    const auto b_depth = wall_depth_priority(a_matches_purge_color, b_inset, b_existing);
+    return a_depth != b_depth ? a_depth > b_depth : a_volume < b_volume;
 }
 
-// Which loop to claim next. `count` must be non-zero and the candidates must
-// already be in wall_before() order.
-//
-// A matching tier claims strictly in that order, i.e. nearest its own exterior
-// first: adjacency to the surface is the requirement, so it is never traded
-// against how well a loop is sized. A foreign tier is best-fit instead - prefer
-// the smallest loop that can absorb the whole remainder: a small flush must not
-// burn a large wall that the print needs anyway, and one wall that takes
-// everything is better than several that each waste part of themselves. When no
-// loop can absorb the remainder, take the largest, so packing converges instead
-// of stalling on the smallest loops.
-template<typename VolumeAt>
-inline size_t pick_volume_fit(size_t count, VolumeAt volume_at, float remaining)
-{
-    size_t largest = count;
-    float  largest_volume = 0.f;
-    for (size_t i = 0; i < count; ++i) {
-        const float volume = volume_at(i);
-        if (volume >= remaining)
-            return i; // ascending order: the first that absorbs the remainder is the smallest
-        if (largest == count || volume > largest_volume) {
-            largest = i;
-            largest_volume = volume;
-        }
-    }
-    return largest;
-}
-
-// Index of the unclaimed slot to take next, over `count` candidates already in
-// wall_before() order, or `count` when the tier is exhausted.
-template<typename VolumeAt>
-inline size_t pick_next_claim(size_t count, bool matches_purge_color, VolumeAt volume_at, float remaining)
-{
-    if (count == 0)
-        return count; // exhausted; a matching tier would otherwise report slot 0
-    if (!matches_purge_color)
-        return pick_volume_fit(count, volume_at, remaining);
-    return 0;
-}
+// Claimed front to back: the allocator consumes the tier in wall_before()
+// order and drops each claimed loop, see ToolOrdering::mark_wiping_extrusions.
+// No loop is ever picked out of turn, so a flush covers a prefix of that order
+// and the purge color stays one contiguous run instead of hopping between the
+// loops that happen to fit its remainder.
 
 // WipeTower2's purge ramp, in mm/s rather than its writer's mm/min. Advance once
 // per purged wall, not once per path segment (Arachne/overhang/scarf can split a
