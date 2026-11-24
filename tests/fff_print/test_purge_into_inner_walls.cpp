@@ -1073,6 +1073,62 @@ TEST_CASE("Purge fills a foreign wall stack from the inside out", "[PurgeIntoInn
     CHECK(claimed.size() < available.size());
 }
 
+TEST_CASE("Purge spots a transition its walls already print the color for", "[PurgeIntoInnerWalls][Regression]")
+{
+    const char *generator = GENERATE("classic", "arachne");
+    CAPTURE(generator);
+
+    Model model;
+    Print print;
+    DynamicPrintConfig config = purge_config(generator, 4, false, 4);
+    config.set_deserialize_strict({{"prime_volume", 1.}});
+    init_purge_print(print, model, config, true, 1);
+    print.process();
+    REQUIRE(print.objects().size() == 2);
+    const PrintObject *object = print.objects().front();
+    REQUIRE(object->layers().size() > 1);
+    const Layer *layer = object->layers()[1];
+    REQUIRE(layer->regions().size() == 1);
+    const PrintRegion &region = layer->regions().front()->region();
+
+    LayerTools tools(layer->print_z);
+    tools.extruders = {0, 1, 2, 3};
+    WipingExtrusions &wiping = tools.wiping_extrusions();
+
+    // The layer's allocation order is decided before any transition is served,
+    // so a transition that would have to repaint a foreign wall has to be told
+    // apart from one that can use a wall already printing its color. This
+    // predicate makes that split, and it must agree with the allocator's own
+    // matching rule.
+    const auto &candidates = layer->purge_inner_walls();
+    REQUIRE(!candidates.empty());
+    std::set<unsigned int> printed;
+    for (const auto &candidate : candidates) {
+        const unsigned int own = unsigned(tools.extruder(*candidate.wall.collection, region));
+        CAPTURE(own);
+        CHECK(wiping.has_matching_target(print, own));
+        printed.insert(own);
+    }
+    // A region's exterior color counts as well, on every object of the layer.
+    for (const PrintObject *layer_object : print.objects()) {
+        const Layer *object_layer = layer_object->get_layer_at_printz(tools.print_z, EPSILON);
+        REQUIRE(object_layer != nullptr);
+        for (const LayerRegion *layerm : object_layer->regions()) {
+            const unsigned int exterior = unsigned(tools.wall_extruder_id(layerm->region()));
+            CAPTURE(exterior);
+            CHECK(wiping.has_matching_target(print, exterior));
+            printed.insert(exterior);
+        }
+    }
+    // A filament nothing on the layer prints can only be served by repainting a
+    // foreign wall, so that transition belongs to the second pass.
+    unsigned int foreign = 0;
+    while (printed.count(foreign) != 0)
+        ++foreign;
+    CAPTURE(foreign);
+    CHECK_FALSE(wiping.has_matching_target(print, foreign));
+}
+
 TEST_CASE("Only purged inner wall seams scatter across layers and copies", "[PurgeIntoInnerWalls][Regression]")
 {
     const char *generator = GENERATE("classic", "arachne");

@@ -5921,13 +5921,32 @@ std::vector<float> Print::_wipe_purge_at_toolchanges()
     layer_leftovers.reserve(m_wipe_tower_data.tool_ordering.layer_tools().size());
     int current_extruder_id = int(m_wipe_tower_data.tool_ordering.first_extruder());
     for (auto &layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) {
-        float layer_leftover = 0.f;
+        // The layer's entry filament, recorded before the order below decides
+        // which transition is served first: the demand and the proportional
+        // reduction are both measured from it.
+        layer_tools.wiping_extrusions().set_purge_initial_extruder(current_extruder_id);
+
+        std::vector<std::pair<unsigned int, unsigned int>> transitions;
         PurgeIntoInnerWalls::for_each_toolchange(layer_tools.extruders, current_extruder_id,
-            [&](unsigned int from, unsigned int to) {
-                const float volume_to_wipe = estimate_flush_volume(m_config, from, to);
-                layer_leftover += layer_tools.wiping_extrusions().mark_wiping_extrusions(
-                    *this, from, to, volume_to_wipe, m_tool_ordering.m_stats_by_single_extruder);
+            [&transitions](unsigned int from, unsigned int to) { transitions.emplace_back(from, to); });
+
+        // Two passes per layer. A transition whose purge color is already printed
+        // on an inner wall or on a region's exterior takes that wall without
+        // repainting anything, and it claims from the outside in (see
+        // PurgeIntoInnerWalls::wall_before()). Serve those first, so a transition
+        // that can only burn a foreign region's walls cannot claim the shell next
+        // to a visible boundary before the color-matched transition gets a turn.
+        // The passes keep print order inside each group, and the volumes are per
+        // transition, so nothing else depends on this order.
+        std::stable_partition(transitions.begin(), transitions.end(),
+            [&](const std::pair<unsigned int, unsigned int> &transition) {
+                return layer_tools.wiping_extrusions().has_matching_target(*this, transition.second);
             });
+
+        float layer_leftover = 0.f;
+        for (const auto &[from, to] : transitions)
+            layer_leftover += layer_tools.wiping_extrusions().mark_wiping_extrusions(
+                *this, from, to, estimate_flush_volume(m_config, from, to), m_tool_ordering.m_stats_by_single_extruder);
         layer_leftovers.emplace_back(layer_leftover);
     }
     return layer_leftovers;

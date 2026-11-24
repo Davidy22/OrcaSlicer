@@ -3542,6 +3542,14 @@ float WipingExtrusions::purge_capacity(const Print& print, unsigned int initial_
     return capacity;
 }
 
+// A wall carries the purge color without repainting anything when the loop
+// itself or its region's exterior already prints it.
+static bool wall_matches_purge_color(const LayerTools &lt, const ExtrusionEntityCollection &wall,
+                                     const PrintRegion &region, unsigned int extruder)
+{
+    return lt.extruder(wall, region) == extruder || lt.wall_extruder_id(region) == extruder;
+}
+
 // Following function iterates through all extrusions on the layer, remembers those that could be used for wiping after toolchange
 // and returns volume that is left to be wiped on the wipe tower.
 // stats: reference to FilamentChangeStats to update purge-into-inner-walls statistics
@@ -3620,9 +3628,7 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                 if (!is_overriddable(*coll, print.config(), *object, layerm->region()))
                     continue;
 
-                const bool matches_own_color  = lt.extruder(*coll, layerm->region()) == new_extruder;
-                const bool matches_outer_wall = lt.wall_extruder_id(layerm->region()) == new_extruder;
-                const bool matches_purge_color = matches_own_color || matches_outer_wall;
+                const bool matches_purge_color = wall_matches_purge_color(lt, *coll, layerm->region(), new_extruder);
                 const int inset_idx = coll->get_max_inset_idx();
                 const bool is_existing = coll->is_existing_purge_wall();
                 const float wall_volume = static_cast<float>(coll->total_volume());
@@ -3869,6 +3875,25 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
 }
 
 
+
+// Purge into inner walls: can this transition print the purge color on a wall
+// that already carries it? Print::_wipe_purge_at_toolchanges() raises those
+// transitions to the front of the layer's allocation order, so a transition that
+// has to repaint a foreign region's walls cannot claim a shell first and leave
+// the color-matched one further in.
+bool WipingExtrusions::has_matching_target(const Print &print, unsigned int new_extruder) const
+{
+    if (!print.config().purge_into_inner_walls.getBool())
+        return false;
+    const LayerTools &lt = *m_layer_tools;
+    for (const PrintObject *object : print.objects())
+        if (const Layer *layer = object->get_layer_at_printz(lt.print_z, EPSILON))
+            for (const auto &candidate : layer->purge_inner_walls())
+                if (this->is_overridable(*candidate.wall.collection, print.config(), *object, candidate.region->region()) &&
+                    wall_matches_purge_color(lt, *candidate.wall.collection, candidate.region->region(), new_extruder))
+                    return true;
+    return false;
+}
 
 // Called after all toolchanges on a layer were mark_infill_overridden. There might still be overridable entities,
 // that were not actually overridden. If they are part of a dedicated object, printing them with the extruder
